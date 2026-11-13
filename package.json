@@ -1,0 +1,22 @@
+{
+  "name": "capri",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Capri — local-first agent harness with memory, RAG, tools and desktop control",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "core": "uv run python -m capri_core",
+    "dev": "npm --workspace @capri/desktop run dev",
+    "build": "npm --workspace @capri/desktop run build",
+    "smoke": "npm --workspace @capri/desktop run smoke"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true,
+    "esbuild@0.21.5": true
+  }
+}

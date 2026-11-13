@@ -1,0 +1,44 @@
+# Build artifacts
+node_modules/
+dist/
+dist-electron/
+out/
+build/
+*.log
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# uv / npm
+.npm/
+uv.lock.bak
+
+# Local data (never committed)
+.capri/
+*.db
+*.db-wal
+*.db-shm
+shards/
+logs/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local overrides
+.capri.yaml
+.env
+.env.local
+
+# smoke artifacts
+.smoke.png
+.smoke-flat.png

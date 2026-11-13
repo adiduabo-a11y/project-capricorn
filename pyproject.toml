@@ -1,0 +1,15 @@
+[project]
+name = "capri"
+version = "0.0.0"
+description = "Capri — local-first agent harness"
+requires-python = ">=3.12,<3.13"
+dependencies = ["capri-core"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+capri-core = { workspace = true }
+
+[tool.uv.workspace]
+members = ["services/core"]

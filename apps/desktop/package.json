@@ -1,0 +1,29 @@
+{
+  "name": "@capri/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Capri's projection layer: avatar, speech bubble, settings",
+  "main": "main.mjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "vite build",
+    "start": "electron .",
+    "smoke": "npm run build && node scripts/smoke.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "pixi.js": "^8.6.6",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.0",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
+  }
+}

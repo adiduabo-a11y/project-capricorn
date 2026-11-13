@@ -1,0 +1,46 @@
+/**
+ * Renderer-side view of the shell bridge.
+ *
+ * The renderer never talks to the daemon directly — the Electron main process
+ * owns the socket, so UI reloads never drop a turn.
+ */
+
+export type AgentState = 'idle' | 'thinking' | 'acting' | 'speaking' | 'error' | 'sleeping'
+
+export interface Usage {
+  in: number
+  out: number
+  ms: number
+}
+
+export type CoreEvent =
+  | { type: 'core.status'; state: 'online' | 'offline'; detail?: string }
+  | { type: 'core.hello'; version?: string; sessionId?: string; vectorBackend?: string }
+  | { type: 'session.opened'; sessionId: string; episodeId: number; subject: string }
+  | { type: 'agent.state'; state: AgentState; detail?: string }
+  | { type: 'agent.delta'; turnId: string; text: string }
+  | { type: 'agent.done'; turnId: string; text: string; usage: Usage }
+  | { type: 'error'; code: string; message: string; fatal?: boolean }
+
+export interface ShellInfo {
+  online: boolean
+  coreUrl: string
+  devUrl: boolean
+  platform: string
+  versions: Record<string, string>
+}
+
+export interface CapriBridge {
+  call<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>
+  info(): Promise<ShellInfo>
+  onEvent(handler: (event: CoreEvent) => void): () => void
+  ready(): void
+}
+
+declare global {
+  interface Window {
+    capri: CapriBridge
+  }
+}
+
+export const capri: CapriBridge = window.capri

@@ -1,0 +1,101 @@
+{
+  "$schema": "./pack.schema.json",
+  "name": "capri-placeholder",
+  "displayName": "Capri (placeholder)",
+  "version": "0.1.0",
+  "author": "capri",
+  "provider": "generated",
+  "canvas": [260, 380],
+  "anchor": "feet-center",
+  "defaultState": "idle",
+  "palette": {
+    "body": "#191521",
+    "bodyMid": "#2e2739",
+    "bodyDeep": "#0d0b13",
+    "ink": "#08070b",
+    "pink": "#ff5fa2",
+    "pinkDeep": "#c93d7f",
+    "green": "#3ef0a0",
+    "greenDeep": "#1c9a68",
+    "eye": "#2ea8ff",
+    "white": "#f2f6ff",
+    "danger": "#ff4d6d"
+  },
+  "states": {
+    "idle": {
+      "motion": "bob",
+      "fps": 4,
+      "loop": true,
+      "blink": 4.2,
+      "description": "Construct at rest, projecting quietly."
+    },
+    "listening": {
+      "motion": "still",
+      "fps": 2,
+      "loop": true,
+      "blink": 5.5,
+      "fx": ["glow"],
+      "description": "Audio capture is hot."
+    },
+    "thinking": {
+      "motion": "still",
+      "fps": 8,
+      "loop": true,
+      "blink": 2.4,
+      "fx": ["glitch"],
+      "description": "Planner working; eye box destabilising."
+    },
+    "talking": {
+      "motion": "bob",
+      "fps": 12,
+      "loop": true,
+      "blink": 6.0,
+      "mouth": {
+        "closed": "m0",
+        "a": "m1",
+        "e": "m2",
+        "i": "m3",
+        "o": "m4",
+        "u": "m5",
+        "m": "m6"
+      },
+      "description": "Streaming speech; mouth driven by visemes."
+    },
+    "working": {
+      "motion": "hover",
+      "fps": 6,
+      "loop": true,
+      "blink": 3.0,
+      "fx": ["wireframe", "glow"],
+      "description": "Long tool run in progress."
+    },
+    "amused": {
+      "motion": "still",
+      "fps": 1,
+      "blink": 3.0,
+      "description": "Something landed."
+    },
+    "annoyed": {
+      "motion": "still",
+      "fps": 1,
+      "blink": 1.8,
+      "fx": ["redshift"],
+      "description": "Tool failure or repeated retry."
+    },
+    "error": {
+      "motion": "still",
+      "fps": 1,
+      "blink": 0.8,
+      "fx": ["glitch", "redshift"],
+      "description": "Daemon unreachable or turn failed."
+    },
+    "sleeping": {
+      "motion": "sleep",
+      "fps": 1,
+      "loop": true,
+      "blink": 0,
+      "fx": ["dim"],
+      "description": "Core offline; projection idling down."
+    }
+  }
+}
