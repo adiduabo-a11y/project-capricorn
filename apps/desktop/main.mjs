@@ -176,6 +176,12 @@ async function waitForRenderer(probe, timeoutMs = 6000) {
 
 let finishing = false
 
+/** ``app.exit`` skips ``before-quit``, so the sidecar is stopped here. */
+function finishSmoke(code) {
+  stopSidecar()
+  setTimeout(() => app.exit(code), 200)
+}
+
 async function maybeFinishSmoke() {
   if (!isSmoke || finishing) return
   if (!smoke.ui || !smoke.turn || smoke.tools < 2 || !smoke.confirm) return
@@ -192,13 +198,13 @@ async function maybeFinishSmoke() {
   `)
   if (!settled) {
     console.log('[smoke] trace did not settle')
-    app.exit(1)
+    finishSmoke(1)
     return
   }
 
   await captureFrame('.smoke.png')
   console.log('[smoke] ok')
-  setTimeout(() => app.exit(0), 200)
+  finishSmoke(0)
 }
 
 function connect() {
@@ -229,7 +235,7 @@ function connect() {
             .then((res) => console.log(`[smoke] turn accepted ${res?.turnId}`))
             .catch((err) => {
               console.error(`[smoke] turn failed: ${err.message}`)
-              app.exit(1)
+              finishSmoke(1)
             })
         }
       })
@@ -265,7 +271,7 @@ function connect() {
           request('confirm.respond', { confirmId: msg.confirmId, approved: true }).catch(
             (err) => {
               console.error(`[smoke] confirm failed: ${err.message}`)
-              app.exit(1)
+              finishSmoke(1)
             },
           )
         }
@@ -374,7 +380,7 @@ function createWindow() {
 
   win.webContents.on('did-fail-load', (_e, code, desc, url) => {
     console.error(`[shell] renderer failed to load: ${code} ${desc} ${url}`)
-    if (isSmoke) app.exit(1)
+    if (isSmoke) finishSmoke(1)
   })
 
   win.webContents.on('render-process-gone', (_e, details) => {

@@ -259,8 +259,10 @@ logs/core.log        rotating daemon log
   `dependencies = ["capri-core"]` + `[tool.uv.sources]`.
 - **`str.format` and JSON do not mix.** The acting protocol contains literal
   braces; substitute with `.replace`.
-- **Orphaned sidecars hold port 8787.** Kill processes whose command line
-  contains `capri_core` before relaunching.
+- **`app.exit()` skips `before-quit`.** The smoke test used it and left the
+  daemon holding port 8787. All exit paths now go through `finishSmoke()`,
+  which stops the sidecar first. If a stray core is still around, kill
+  processes whose command line contains `capri_core`.
 - **LM Studio drops `role: "tool"` without `tool_call_id`.** It answers with
   empty content, so the planner never sees the observation. Observations ride
   on the user role here; the wire format is tested by `live_brain.py`.
