@@ -15,7 +15,8 @@ const appDir = path.resolve(here, '..')
 const child = spawn(electronPath, ['.', '--smoke'], {
   cwd: appDir,
   stdio: 'inherit',
-  env: { ...process.env },
+  // Deterministic planner: no model, no GPU, no network.
+  env: { ...process.env, CAPRI_FAKE_BRAIN: '1' },
 })
 
 child.on('exit', (code, signal) => {

@@ -10,6 +10,7 @@ import asyncio
 import hmac
 import json
 import logging
+import os
 import sqlite3
 import time
 import uuid
@@ -19,8 +20,11 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from .. import __version__, paths
+from ..agent import TurnRunner
 from ..config import CapriConfig, load_config, save_config, schema, set_value
+from ..models import Router
 from ..store import db
+from ..tools import Policy, builtin_registry
 from . import protocol
 from .session import Session
 
@@ -40,21 +44,6 @@ class RpcError(Exception):
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
-
-
-def _estimate_tokens(text: str) -> int:
-    return max(1, len(text) // 4)
-
-
-def _chunks(text: str, size: int = 3) -> list[str]:
-    words = text.split(" ")
-    out: list[str] = []
-    for i in range(0, len(words), size):
-        piece = " ".join(words[i : i + size])
-        if i + size < len(words):
-            piece += " "
-        out.append(piece)
-    return out
 
 
 class Client:
@@ -83,11 +72,23 @@ class CapriServer:
         self.conn = conn
         self.clients: set[Client] = set()
         self.started_at = _now_ms()
+        self.workspace = os.path.abspath(config.policy.workspace or os.getcwd())
+        self.registry = builtin_registry()
+        self.policy = Policy(config.policy, self.workspace)
+        if os.environ.get("CAPRI_FAKE_BRAIN") == "1":
+            from ..agent.fake import ScriptedBrain
+
+            log.warning("scripted brain enabled (CAPRI_FAKE_BRAIN=1)")
+            self.brain = ScriptedBrain(self.workspace)
+        else:
+            self.brain = Router(config.models)
+        self.confirms: dict[str, asyncio.Future[bool]] = {}
         self.methods: dict[str, Handler] = {
             "hello": self._hello,
             "ping": self._ping,
             "turn.send": self._turn_send,
             "turn.cancel": self._turn_cancel,
+            "confirm.respond": self._confirm_respond,
             "config.get": self._config_get,
             "config.set": self._config_set,
             "config.schema": self._config_schema,
@@ -95,6 +96,8 @@ class CapriServer:
             "memory.list": self._memory_list,
             "memory.search": self._memory_search,
             "session.info": self._session_info,
+            "tools.list": self._tools_list,
+            "models.status": self._models_status,
         }
 
     # ------------------------------------------------------------------ lifecycle
@@ -308,54 +311,21 @@ class CapriServer:
     async def _run_turn(
         self, client: Client, session: Session, turn_id: str, text: str
     ) -> None:
-        started = time.monotonic()
+        runner = TurnRunner(
+            config=self.config,
+            conn=self.conn,
+            session=session,
+            emit=client.send,
+            confirm=lambda request: self._ask_user(client, request),
+            brain=self.brain,
+            registry=self.registry,
+            policy=self.policy,
+            workspace=self.workspace,
+        )
         try:
-            await client.send(protocol.state("thinking"))
-            session.add_message(turn_id, "user", text)
-
-            # Phase 0: no planner yet. Echo, but stream it exactly like a real
-            # turn so the whole UI path (deltas -> done) is exercised.
-            reply = self._stub_reply(text)
-
-            await client.send(protocol.state("speaking"))
-            emitted: list[str] = []
-            for chunk in _chunks(reply):
-                await client.send(protocol.event("agent.delta", turnId=turn_id, text=chunk))
-                emitted.append(chunk)
-                await asyncio.sleep(0.02)
-
-            final = "".join(emitted)
-            session.add_message(turn_id, "assistant", final)
-
-            tokens_in = _estimate_tokens(text)
-            tokens_out = _estimate_tokens(final)
-            session.add_tokens(tokens_in + tokens_out)
-
-            ms = int((time.monotonic() - started) * 1000)
-            db.trace(
-                self.conn,
-                span="turn",
-                turn_id=turn_id,
-                name="turn.echo",
-                payload={"in": text, "out": final},
-                tokens_in=tokens_in,
-                tokens_out=tokens_out,
-                ms=ms,
-            )
-
-            await client.send(
-                protocol.event(
-                    "agent.done",
-                    turnId=turn_id,
-                    text=final,
-                    usage={"in": tokens_in, "out": tokens_out, "ms": ms},
-                )
-            )
-            await client.send(protocol.state("idle"))
-
+            await runner.run(turn_id, text)
         except asyncio.CancelledError:
             log.info("turn %s cancelled", turn_id)
-            await client.send(protocol.state("idle", "cancelled"))
             raise
         except Exception:
             log.exception("turn %s failed", turn_id)
@@ -364,12 +334,55 @@ class CapriServer:
             )
             await client.send(protocol.state("idle", "error"))
 
-    def _stub_reply(self, text: str) -> str:
-        clipped = text if len(text) <= 400 else text[:400] + "…"
-        return (
-            "Signal received. My planner isn't wired up yet, so this is an echo: "
-            f"{clipped}"
-        )
+    async def _ask_user(self, client: Client, request: dict[str, Any]) -> bool:
+        """Emit a confirmation card and wait for the shell's answer."""
+        confirm_id = str(request["confirmId"])
+        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self.confirms[confirm_id] = future
+        await client.send(protocol.event("agent.confirm", **request))
+        try:
+            return await asyncio.wait_for(
+                future, timeout=min(int(request.get("timeout") or 180), 3600)
+            )
+        except asyncio.TimeoutError:
+            log.info("confirmation %s timed out", confirm_id)
+            return False
+        finally:
+            self.confirms.pop(confirm_id, None)
+
+    async def _confirm_respond(
+        self, client: Client, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        self._require_session(client)
+        confirm_id = str(params.get("confirmId") or "")
+        future = self.confirms.get(confirm_id)
+        if future is None or future.done():
+            raise RpcError("not_found", f"no pending confirmation {confirm_id!r}")
+        future.set_result(bool(params.get("approved")))
+        return {"confirmId": confirm_id, "approved": bool(params.get("approved"))}
+
+    async def _tools_list(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "tools": [
+                {
+                    "name": spec.name,
+                    "description": spec.description,
+                    "tier": spec.tier,
+                    "params": spec.params,
+                }
+                for spec in self.registry.specs()
+            ],
+            "workspace": self.workspace,
+        }
+
+    async def _models_status(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "endpoint": self.config.models.endpoint,
+            "online": await self.brain.available(),
+            "planner": self.config.models.planner.name,
+            "reflex": self.config.models.reflex.name,
+            "structured": self.config.models.structured,
+        }
 
 
 async def run_server(config: CapriConfig | None = None, *, host: str | None = None,
@@ -382,4 +395,5 @@ async def run_server(config: CapriConfig | None = None, *, host: str | None = No
     try:
         await server.run(host, port)
     finally:
+        await server.brain.aclose()
         conn.close()

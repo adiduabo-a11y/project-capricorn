@@ -39,7 +39,7 @@ let reconnectDelay = 300
 let nextId = 1
 let rendererReady = false
 
-const smoke = { ui: false, turn: false }
+const smoke = { ui: false, turn: false, tools: 0, confirm: false }
 
 const pending = new Map() // id -> { resolve, reject, timer }
 const eventBacklog = [] // events emitted before the renderer was ready
@@ -146,22 +146,57 @@ function waitForOnline(timeoutMs = 10000) {
   })
 }
 
-/** Smoke mode: exit only when the UI has rendered AND a real turn round-tripped. */
-async function maybeFinishSmoke() {
-  if (!isSmoke || !smoke.ui || !smoke.turn) return
+/** Smoke mode: exit only when the UI has rendered AND a scripted turn has
+ *  run a tool, asked for approval and finished. */
+async function captureFrame(name) {
   try {
-    if (win && !win.isDestroyed()) {
-      // A transparent window captures as premultiplied alpha, which reads as
-      // blown-out when viewed naively. Paint a backdrop for the capture only.
-      win.setBackgroundColor('#201e26')
-      await new Promise((r) => setTimeout(r, 200))
-      const image = await win.webContents.capturePage()
-      writeFileSync(path.join(here, '.smoke.png'), image.toPNG())
-      console.log('[smoke] frame captured')
-    }
+    if (!win || win.isDestroyed()) return
+    // A transparent window captures as premultiplied alpha, which reads as
+    // blown-out when viewed naively. Paint a backdrop for the capture only.
+    win.setBackgroundColor('#201e26')
+    await new Promise((r) => setTimeout(r, 180))
+    const image = await win.webContents.capturePage()
+    writeFileSync(path.join(here, name), image.toPNG())
+    console.log(`[smoke] captured ${name}`)
   } catch (err) {
     console.log(`[smoke] capture skipped: ${err.message}`)
   }
+}
+
+async function waitForRenderer(probe, timeoutMs = 6000) {
+  if (!win || win.isDestroyed()) return false
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const ok = await win.webContents.executeJavaScript(probe).catch(() => false)
+    if (ok) return true
+    await new Promise((r) => setTimeout(r, 120))
+  }
+  return false
+}
+
+let finishing = false
+
+async function maybeFinishSmoke() {
+  if (!isSmoke || finishing) return
+  if (!smoke.ui || !smoke.turn || smoke.tools < 2 || !smoke.confirm) return
+  finishing = true
+
+  // Events arrive before React paints. Wait for the trace to actually contain
+  // both tool chips, no pending approval, and a finished assistant message —
+  // otherwise the capture is a picture of the previous frame.
+  const settled = await waitForRenderer(`
+    !!document.querySelector('.msg.assistant p') &&
+    document.querySelector('.msg.assistant p').innerText.length > 8 &&
+    !document.querySelector('.confirm') &&
+    document.querySelectorAll('.tool').length >= 2
+  `)
+  if (!settled) {
+    console.log('[smoke] trace did not settle')
+    app.exit(1)
+    return
+  }
+
+  await captureFrame('.smoke.png')
   console.log('[smoke] ok')
   setTimeout(() => app.exit(0), 200)
 }
@@ -222,9 +257,22 @@ function connect() {
     }
     if (msg.type) {
       emitToRenderer(msg)
-      if (isSmoke && msg.type === 'agent.done') {
-        smoke.turn = true
-        void maybeFinishSmoke()
+      if (isSmoke) {
+        if (msg.type === 'agent.tool') smoke.tools += 1
+        if (msg.type === 'agent.confirm') {
+          smoke.confirm = true
+          void captureFrame('.smoke-confirm.png')
+          request('confirm.respond', { confirmId: msg.confirmId, approved: true }).catch(
+            (err) => {
+              console.error(`[smoke] confirm failed: ${err.message}`)
+              app.exit(1)
+            },
+          )
+        }
+        if (msg.type === 'agent.done') {
+          smoke.turn = true
+          void maybeFinishSmoke()
+        }
       }
     }
   })

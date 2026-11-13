@@ -42,3 +42,6 @@ desktop.ini
 # smoke artifacts
 .smoke.png
 .smoke-flat.png
+.smoke-confirm.png
+.live/
+

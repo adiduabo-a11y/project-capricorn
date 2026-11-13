@@ -13,11 +13,36 @@ export interface Usage {
   ms: number
 }
 
+/** A tool call the daemon wants the user to authorise before it runs. */
+export interface ConfirmRequest {
+  turnId: string
+  confirmId: string
+  tool: string
+  args: Record<string, unknown>
+  tier: number
+  tierName: string
+  reason: string
+  timeout: number
+}
+
 export type CoreEvent =
   | { type: 'core.status'; state: 'online' | 'offline'; detail?: string }
   | { type: 'core.hello'; version?: string; sessionId?: string; vectorBackend?: string }
   | { type: 'session.opened'; sessionId: string; episodeId: number; subject: string }
   | { type: 'agent.state'; state: AgentState; detail?: string }
+  | { type: 'agent.step'; turnId: string; step: number; thought: string; tool: string }
+  | {
+      type: 'agent.tool'
+      turnId: string
+      name: string
+      args: Record<string, unknown>
+      ok: boolean
+      tier: number
+      tierName: string
+      output: string
+      ms: number
+    }
+  | { type: 'agent.confirm' } & ConfirmRequest
   | { type: 'agent.delta'; turnId: string; text: string }
   | { type: 'agent.done'; turnId: string; text: string; usage: Usage }
   | { type: 'error'; code: string; message: string; fatal?: boolean }

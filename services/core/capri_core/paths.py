@@ -34,6 +34,23 @@ def config_path() -> Path:
     return capri_home() / "config.yaml"
 
 
+def packs_dir() -> Path:
+    """Repo ``packs/`` directory, or ``CAPRI_PACKS`` when set.
+
+    Persona and sprite packs are data: they are edited far more often than code,
+    so they live outside the Python package.
+    """
+    override = os.environ.get("CAPRI_PACKS")
+    if override:
+        return Path(override).expanduser()
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "packs"
+        if candidate.is_dir():
+            return candidate
+    return Path.cwd() / "packs"
+
+
 def db_path(subject: str = DEFAULT_SUBJECT) -> Path:
     return shards_dir() / subject / "capri.db"
 

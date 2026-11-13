@@ -238,6 +238,226 @@ body {
   animation: blink 0.9s steps(1) infinite;
 }
 
+/* ------------------------------------------------------------ trace rows */
+
+.step {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding-left: 2px;
+  font-size: 10.5px;
+  color: var(--muted);
+  opacity: 0.75;
+}
+
+.step-n {
+  flex: none;
+  width: 13px;
+  text-align: right;
+  color: rgba(62, 240, 160, 0.55);
+  font-variant-numeric: tabular-nums;
+}
+
+.step-tool {
+  flex: none;
+  color: rgba(255, 95, 162, 0.85);
+  letter-spacing: 0.04em;
+}
+
+.step-thought {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-style: italic;
+}
+
+.tool {
+  border-left: 2px solid rgba(62, 240, 160, 0.35);
+  padding: 3px 0 3px 9px;
+  font-size: 11px;
+}
+
+.tool.bad {
+  border-left-color: rgba(255, 77, 109, 0.6);
+}
+
+.tool > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  list-style: none;
+  color: #c9c3dd;
+}
+
+.tool > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-name {
+  color: var(--green);
+  letter-spacing: 0.02em;
+}
+
+.tool.bad .tool-name {
+  color: var(--danger);
+}
+
+.tool-tier {
+  font-size: 8px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 1px 4px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  color: var(--muted);
+  opacity: 0.8;
+}
+
+.tool-tier[data-tier='2'],
+.confirm-tier[data-tier='2'] {
+  color: #f5c451;
+}
+
+.tool-tier[data-tier='3'],
+.confirm-tier[data-tier='3'] {
+  color: var(--danger);
+}
+
+.tool-tier[data-tier='4'],
+.confirm-tier[data-tier='4'] {
+  color: #b98bff;
+}
+
+.tool-args {
+  color: var(--muted);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 190px;
+}
+
+.tool-ms {
+  font-size: 9.5px;
+  color: var(--muted);
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
+.tool-out {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  max-height: 130px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--hairline);
+  font-family: 'Cascadia Mono', 'Consolas', monospace;
+  font-size: 10px;
+  line-height: 1.5;
+  color: #b9b2cc;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* -------------------------------------------------------------- confirm */
+
+.confirm {
+  margin: 0 12px 6px;
+  padding: 9px 10px;
+  border: 1px solid rgba(245, 196, 81, 0.4);
+  background: linear-gradient(180deg, rgba(45, 36, 12, 0.85), rgba(24, 20, 8, 0.85));
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%);
+}
+
+.confirm-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.confirm-tool {
+  color: #f5c451;
+  font-weight: 600;
+}
+
+.confirm-tier {
+  font-size: 8px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 1px 4px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  color: var(--muted);
+}
+
+.confirm-timer {
+  font-size: 9.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.confirm-reason {
+  margin: 5px 0 6px;
+  font-size: 11px;
+  color: #e6dfc8;
+}
+
+.confirm-args {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  max-height: 96px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid var(--hairline);
+  font-family: 'Cascadia Mono', 'Consolas', monospace;
+  font-size: 10px;
+  line-height: 1.45;
+  color: #cfc7a8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.confirm-actions button {
+  border: 0;
+  padding: 6px 14px;
+  font: inherit;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  cursor: pointer;
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%);
+}
+
+.confirm-actions .deny {
+  background: rgba(255, 255, 255, 0.09);
+  color: #d8d3e4;
+}
+
+.confirm-actions .deny:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.confirm-actions .approve {
+  background: linear-gradient(180deg, #f7d06a, #d9a52f);
+  color: #1b1403;
+}
+
+.confirm-actions .approve:hover {
+  filter: brightness(1.08);
+}
+
 /* -------------------------------------------------------------- composer */
 
 .composer {

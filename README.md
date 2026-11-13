@@ -13,8 +13,9 @@ is only her projection.
 
 ## Status
 
-Phase 0 — scaffold. The daemon runs, the shell connects, turns stream, and the
-avatar idle-animates from a data-driven sprite pack.
+Phase 1 — brain. The daemon routes to a local model, runs plan → act → observe
+with grammar-constrained tool calls, and gates every action through permission
+tiers. The avatar idle-animates from a data-driven sprite pack.
 
 | Subsystem | State |
 |---|---|
@@ -23,13 +24,19 @@ avatar idle-animates from a data-driven sprite pack.
 | Config (layered, schema-validated) | working |
 | Shell (Electron, transparent window) | working |
 | Avatar (procedural placeholder pack) | working |
-| Brain (planner / tools) | stub — echoes |
+| Brain (router, loop, policy, 3 builtins) | working |
+| Trace UI (steps, tool chips, approvals) | working |
 | Memory / RAG / Voice / Screen | schema only, not wired |
 
 ## Requirements
 
 - Windows 11, Node 20+, Python 3.12, [uv](https://docs.astral.sh/uv/)
-- `llama-server` (or LM Studio) on `http://127.0.0.1:8080/v1` — not needed until phase 1
+- A local OpenAI-compatible endpoint: `llama-server` (default
+  `http://127.0.0.1:8080/v1`) or LM Studio
+  (`CAPRI_MODELS__ENDPOINT=http://127.0.0.1:1234/v1`). Pick the structured
+  mode that server speaks: `CAPRI_MODELS__STRUCTURED=grammar` (llama.cpp) or
+  `json_schema` (LM Studio). Set `CAPRI_FAKE_BRAIN=1` for a deterministic
+  scripted planner (the smoke tests do).
 
 ## Run
 
@@ -50,8 +57,10 @@ $env:CAPRI_NO_SIDECAR="1"; npm run dev
 ## Verify
 
 ```powershell
-uv run python services/core/tests/ws_smoke.py   # daemon end-to-end (daemon must be running)
-npm run smoke                                   # build + launch + wait for a rendered frame
+uv run python services/core/tests/test_brain.py   # offline: loop, policy, grammar, stall guard
+uv run python services/core/tests/ws_smoke.py     # daemon over the wire (daemon must be running)
+uv run python services/core/tests/live_brain.py   # real model + tools + approval (daemon must be running)
+npm run smoke                                     # build + launch + rendered trace + approval
 npm --workspace @capri/desktop run typecheck
 ```
 

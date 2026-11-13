@@ -54,6 +54,16 @@ class GovernorCfg(_Base):
 
 class ModelsCfg(_Base):
     endpoint: str = "http://127.0.0.1:8080/v1"
+    # Constrained decoding. `grammar` is llama.cpp's GBNF field; `json_schema`
+    # is the OpenAI-compatible response_format that LM Studio implements.
+    # `none` leaves it to the prompt.
+    structured: Literal["grammar", "json_schema", "none"] = "grammar"
+    # Qwen3 and friends spend the whole budget "thinking" and then emit nothing
+    # usable under a JSON grammar. llama-server accepts this template kwarg.
+    disable_thinking: bool = True
+
+    request_timeout_s: int = Field(default=180, ge=5, le=1800)
+    health_ttl_s: int = Field(default=10, ge=1, le=120)
     planner: ModelCfg = Field(
         default_factory=lambda: ModelCfg(
             name="qwen3-14b-instruct-q4_k_m", ctx=16384, temperature=0.6
@@ -75,6 +85,9 @@ class AgentCfg(_Base):
     max_wall_clock_s: int = Field(default=600, ge=10)
     context_budget_tokens: int = Field(default=12000, ge=1024)
     one_tool_per_turn: bool = True
+    persona_pack: str = "kyoko"
+    confirm_timeout_s: int = Field(default=180, ge=10, le=3600)
+    history_messages: int = Field(default=30, ge=2, le=200)
 
 
 class MemoryCfg(_Base):
@@ -131,6 +144,8 @@ class ConfirmCfg(_Base):
 
 class PolicyCfg(_Base):
     profile: Literal["focus", "work", "chatty", "silent"] = "focus"
+    # Relative tool paths resolve here. Empty means the daemon's cwd.
+    workspace: str = ""
     allow_paths: list[str] = Field(
         default_factory=lambda: [
             "C:/Users/daeme/projects",

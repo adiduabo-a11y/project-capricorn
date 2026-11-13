@@ -66,10 +66,19 @@ async def main() -> int:
         deltas: list[str] = []
         done = None
         states: list[str] = []
+        confirms = 0
         while True:
             ev = json.loads(await asyncio.wait_for(ws.recv(), timeout=20))
             if ev.get("type") == "agent.state":
                 states.append(ev["state"])
+            elif ev.get("type") == "agent.confirm":
+                confirms += 1
+                await rpc(
+                    ws,
+                    f"c{confirms}",
+                    "confirm.respond",
+                    {"confirmId": ev["confirmId"], "approved": True},
+                )
             elif ev.get("type") == "agent.delta" and ev.get("turnId") == turn_id:
                 deltas.append(ev["text"])
             elif ev.get("type") == "agent.done" and ev.get("turnId") == turn_id:
@@ -78,8 +87,9 @@ async def main() -> int:
 
         check(len(deltas) > 1, f"streamed {len(deltas)} deltas")
         check(done is not None, "turn completed")
-        check("hello capri" in (done or {}).get("text", ""), "echo contains input")
+        check(bool((done or {}).get("text", "").strip()), "turn produced a reply")
         check(states[:1] == ["thinking"], f"state order {states}")
+        check(confirms == 1, f"asked for approval ({confirms})")
         if done:
             print(f"  .... {done['usage']}")
 
@@ -92,6 +102,13 @@ async def main() -> int:
 
         mem = await rpc(ws, "r5", "memory.list")
         check(isinstance(mem["result"]["items"], list), "memory.list")
+
+        tools = await rpc(ws, "r5b", "tools.list")
+        names = [t["name"] for t in tools["result"]["tools"]]
+        check({"fs.read", "fs.write", "shell.run"} <= set(names), f"tools: {names}")
+
+        models = await rpc(ws, "r5c", "models.status")
+        check("online" in models["result"], "models.status")
 
         info = await rpc(ws, "r6", "session.info")
         check(len(info["result"]["messages"]) >= 2, "messages persisted")
