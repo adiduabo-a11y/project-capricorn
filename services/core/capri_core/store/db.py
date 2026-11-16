@@ -27,6 +27,9 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     target.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(target, isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # Another process holding the write lock is a wait, not an immediate
+    # "database is locked" in the middle of a turn.
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -42,6 +45,12 @@ def _migrations() -> list[tuple[int, str, str]]:
         found.append((int(match.group(1)), match.group(2), file.read_text(encoding="utf-8")))
     found.sort(key=lambda item: item[0])
     return found
+
+
+def latest_schema_version() -> int:
+    """The newest migration shipped with this build."""
+    found = _migrations()
+    return found[-1][0] if found else 0
 
 
 def migrate(conn: sqlite3.Connection) -> int:
@@ -72,25 +81,102 @@ def trace(
     name: str,
     span: str = "tool",
     turn_id: str | None = None,
+    workspace_id: str | None = None,
+    task_id: str | None = None,
     payload: Any = None,
     tokens_in: int | None = None,
     tokens_out: int | None = None,
     ms: int | None = None,
 ) -> int:
-    """Append one trace row. Traces are the replay log for the whole harness."""
+    """Append one trace row. Traces are the replay log for the whole harness.
+
+    ``workspace_id`` and ``task_id`` are recorded from Milestone 0 onward, even
+    while they are empty: retrofitting them later would mean a migration and a
+    trace-viewer change landing together.
+    """
     blob = json.dumps(payload, ensure_ascii=False, default=str) if payload is not None else None
     cur = conn.execute(
-        "INSERT INTO traces (turn_id, span, name, payload, tokens_in, tokens_out, ms, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (turn_id, span, name, blob, tokens_in, tokens_out, ms, int(time.time() * 1000)),
+        "INSERT INTO traces (turn_id, workspace_id, task_id, span, name, payload,"
+        " tokens_in, tokens_out, ms, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            turn_id,
+            workspace_id or None,
+            task_id or None,
+            span,
+            name,
+            blob,
+            tokens_in,
+            tokens_out,
+            ms,
+            int(time.time() * 1000),
+        ),
     )
     return int(cur.lastrowid or 0)
 
 
 def recent_traces(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, Any]]:
     rows = conn.execute(
-        "SELECT id, turn_id, span, name, payload, tokens_in, tokens_out, ms, created_at"
-        " FROM traces ORDER BY id DESC LIMIT ?",
+        "SELECT id, turn_id, workspace_id, task_id, span, name, payload, tokens_in,"
+        " tokens_out, ms, created_at FROM traces ORDER BY id DESC LIMIT ?",
+        (max(1, min(limit, 500)),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def record_tool_stat(
+    conn: sqlite3.Connection,
+    name: str,
+    *,
+    ok: bool,
+    ms: int,
+    version: str | None = None,
+) -> int:
+    """Update the live tool-health row and return the current failure streak."""
+    row = conn.execute(
+        "SELECT calls, ok, avg_ms, fail_streak FROM tool_stats WHERE name = ?", (name,)
+    ).fetchone()
+    calls = int(row["calls"]) if row else 0
+    successes = int(row["ok"]) if row else 0
+    average = float(row["avg_ms"]) if row and row["avg_ms"] is not None else 0.0
+    streak = int(row["fail_streak"]) if row else 0
+    new_calls = calls + 1
+    new_ok = successes + (1 if ok else 0)
+    new_average = (average * calls + max(0, int(ms))) / new_calls
+    new_streak = 0 if ok else streak + 1
+    conn.execute(
+        "INSERT INTO tool_stats (name, calls, ok, avg_ms, fail_streak, version, quarantined)"
+        " VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT quarantined FROM tool_stats WHERE name = ?), 0))"
+        " ON CONFLICT(name) DO UPDATE SET"
+        " calls = excluded.calls, ok = excluded.ok, avg_ms = excluded.avg_ms,"
+        " fail_streak = excluded.fail_streak,"
+        " version = COALESCE(excluded.version, tool_stats.version)",
+        (
+            name,
+            new_calls,
+            new_ok,
+            new_average,
+            new_streak,
+            version,
+            name,
+        ),
+    )
+    return new_streak
+
+
+def set_tool_quarantined(conn: sqlite3.Connection, name: str, value: bool) -> None:
+    conn.execute(
+        "INSERT INTO tool_stats (name, calls, ok, avg_ms, fail_streak, quarantined)"
+        " VALUES (?, 0, 0, 0, 0, ?)"
+        " ON CONFLICT(name) DO UPDATE SET quarantined = excluded.quarantined",
+        (name, 1 if value else 0),
+    )
+
+
+def tool_stats(conn: sqlite3.Connection, limit: int = 100) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT name, calls, ok, avg_ms, fail_streak, version, quarantined"
+        " FROM tool_stats ORDER BY calls DESC, name LIMIT ?",
         (max(1, min(limit, 500)),),
     ).fetchall()
     return [dict(row) for row in rows]
@@ -109,13 +195,13 @@ def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
-def open_shard(subject: str = paths.DEFAULT_SUBJECT) -> sqlite3.Connection:
+def open_shard(subject: str = paths.DEFAULT_SUBJECT, dim: int = 1024) -> sqlite3.Connection:
     """Open (and migrate) the shard for a subject."""
     from .vector import ensure_vector_tables
 
     conn = connect(paths.db_path(subject))
     version = migrate(conn)
-    backend = ensure_vector_tables(conn)
+    backend = ensure_vector_tables(conn, dim)
     set_meta(conn, "schema_version", str(version))
     set_meta(conn, "vector_backend", backend)
     return conn

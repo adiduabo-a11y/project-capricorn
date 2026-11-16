@@ -14,10 +14,126 @@ const api = {
     return ipcRenderer.invoke('capri:info')
   },
 
+  openFile(path, offset = 0) {
+    return ipcRenderer.invoke('capri:open-file', path, offset)
+  },
+
+  chooseFolder() {
+    return ipcRenderer.invoke('capri:choose-folder')
+  },
+
+  setWorkLayout(active) {
+    return ipcRenderer.invoke('capri:work-layout', !!active)
+  },
+
   onEvent(handler) {
     const listener = (_event, payload) => handler(payload)
     ipcRenderer.on('capri:event', listener)
     return () => ipcRenderer.off('capri:event', listener)
+  },
+
+  onHotkey(handler) {
+    const listener = (_event, action) => handler(action)
+    ipcRenderer.on('capri:hotkey', listener)
+    return () => ipcRenderer.off('capri:hotkey', listener)
+  },
+
+  onAudioMuted(handler) {
+    const listener = (_event, muted) => handler(!!muted)
+    ipcRenderer.on('capri:audio-muted', listener)
+    return () => ipcRenderer.off('capri:audio-muted', listener)
+  },
+
+  onWakeChanged(handler) {
+    const listener = (_event, enabled) => handler(!!enabled)
+    ipcRenderer.on('capri:wake-changed', listener)
+    return () => ipcRenderer.off('capri:wake-changed', listener)
+  },
+
+  setWakeState(enabled) {
+    ipcRenderer.send('capri:wake-state', !!enabled)
+  },
+
+  toggleWake() {
+    return ipcRenderer.invoke('capri:toggle-wake')
+  },
+
+  windowControl(action) {
+    return ipcRenderer.invoke('capri:window', action)
+  },
+
+  setUiMode(mode) {
+    return ipcRenderer.invoke('capri:ui-mode', mode)
+  },
+
+  onUiMode(handler) {
+    const listener = (_event, mode) => handler(String(mode || ''))
+    ipcRenderer.on('capri:ui-mode', listener)
+    return () => ipcRenderer.off('capri:ui-mode', listener)
+  },
+
+  onBubbleSide(handler) {
+    const listener = (_event, side) => handler(String(side || ''))
+    ipcRenderer.on('capri:bubble-side', listener)
+    return () => ipcRenderer.off('capri:bubble-side', listener)
+  },
+
+  petReady() {
+    ipcRenderer.send('capri:pet-ready')
+  },
+
+  petPointer(interactive) {
+    ipcRenderer.send('capri:pet-pointer', !!interactive)
+  },
+
+  reportPetBounds(bounds) {
+    if (!bounds || typeof bounds !== 'object') return
+    ipcRenderer.send('capri:pet-bounds', {
+      x: Number(bounds.x),
+      y: Number(bounds.y),
+      width: Number(bounds.width),
+      height: Number(bounds.height),
+    })
+  },
+
+  petMenu(state) {
+    ipcRenderer.send('capri:pet-menu', {
+      wander: !!(state && state.wander),
+      sleeping: !!(state && state.sleeping),
+      anchored: !!(state && state.anchored),
+    })
+  },
+
+  onPetCommand(handler) {
+    const listener = (_event, command) => handler(String(command || ''))
+    ipcRenderer.on('capri:pet-command', listener)
+    return () => ipcRenderer.off('capri:pet-command', listener)
+  },
+
+  onPetCue(handler) {
+    const listener = (_event, cue) => handler(String(cue || ''))
+    ipcRenderer.on('capri:pet-cue', listener)
+    return () => ipcRenderer.off('capri:pet-cue', listener)
+  },
+
+  onPetMouth(handler) {
+    const listener = (_event, viseme) => handler(viseme == null ? null : String(viseme))
+    ipcRenderer.on('capri:pet-mouth', listener)
+    return () => ipcRenderer.off('capri:pet-mouth', listener)
+  },
+
+  onPetReset(handler) {
+    const listener = () => handler()
+    ipcRenderer.on('capri:pet-reset', listener)
+    return () => ipcRenderer.off('capri:pet-reset', listener)
+  },
+
+  setMouth(viseme) {
+    ipcRenderer.send('capri:mouth', viseme == null ? null : String(viseme))
+  },
+
+  petCue(cue) {
+    ipcRenderer.send('capri:pet-cue', String(cue || ''))
   },
 
   ready() {

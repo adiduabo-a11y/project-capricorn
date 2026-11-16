@@ -1,0 +1,37 @@
+appId: com.projectcapricorn.desktop
+productName: Project Capricorn
+electronVersion: 33.4.11
+asar: true
+directories:
+  output: release
+  buildResources: assets
+files:
+  - main.mjs
+  - preload.mjs
+  - package.json
+  - assets/**
+  - dist/**
+extraResources:
+  - from: resources
+    to: .
+    filter:
+      - capri-core*
+  - from: ../../packs
+    to: packs
+win:
+  # Capri's own icon from the project's quest assets, cut into a multi-size .ico
+  # in assets/ (buildResources), so the exe and its shortcuts stop showing
+  # Electron's default mark.
+  icon: icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: Project-Capricorn-Setup-${version}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Project Capricorn

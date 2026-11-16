@@ -1,0 +1,142 @@
+{
+  "name": "capri-neon",
+  "displayName": "Capri",
+  "version": "1.0.0",
+  "author": "Lachy (https://github.com/lachydotmcg)",
+  "provider": "sprite",
+  "canvas": [116, 384],
+  "anchor": "feet-center",
+  "defaultState": "idle",
+  "palette": {
+    "body": "#0b0911",
+    "bodyMid": "#1b0f1d",
+    "bodyDeep": "#07060b",
+    "ink": "#08070b",
+    "pink": "#ff2050",
+    "pinkDeep": "#c4123d",
+    "green": "#32f06a",
+    "greenDeep": "#178a3e",
+    "eye": "#5ef0f6",
+    "white": "#ececf1",
+    "danger": "#e84246"
+  },
+  "clips": {
+    "idle": { "sheet": "idle", "count": 60, "fps": 24, "loop": true },
+    "idle_blink": { "sheet": "idle_blink", "count": 8, "fps": 24, "loop": false },
+    "idle_mouth": { "sheet": "idle_mouth", "count": 5, "fps": 12, "loop": false },
+    "glitch": { "sheet": "glitch", "count": 10, "fps": 15, "loop": true },
+    "think": { "sheet": "glitch", "count": 10, "fps": 6, "loop": true },
+    "work": { "sheet": "glitch", "count": 10, "fps": 12, "loop": true },
+    "sleep": { "sheet": "sleep", "count": 16, "fps": 6, "loop": true },
+    "walk": { "sheet": "walk", "count": 12, "fps": 12, "loop": true },
+    "dangle": { "sheet": "dangle", "count": 24, "fps": 10, "loop": true },
+    "grin": { "sheet": "grin", "count": 16, "fps": 8, "loop": false },
+    "dance": { "sheet": "dance", "count": 16, "fps": 16, "loop": true },
+    "wake": { "sheet": "wake", "count": 13, "fps": 15, "loop": false },
+    "leave": { "sheet": "leave", "count": 12, "fps": 15, "loop": false }
+  },
+  "states": {
+    "idle": {
+      "clip": "idle",
+      "blinkClip": "idle_blink",
+      "blink": 4.2,
+      "description": "Standing at rest, breathing on a 24 fps loop."
+    },
+    "listening": {
+      "clip": "idle",
+      "blinkClip": "idle_blink",
+      "blink": 5.5,
+      "fx": ["listening"],
+      "description": "Audio capture is hot."
+    },
+    "thinking": {
+      "clip": "think",
+      "blink": 0,
+      "fx": ["thinking"],
+      "description": "Planner working; the projection shimmers while she thinks."
+    },
+    "talking": {
+      "clip": "idle",
+      "blink": 0,
+      "mouthClip": "idle_mouth",
+      "mouth": {
+        "closed": "0",
+        "m": "0",
+        "u": "1",
+        "o": "2",
+        "e": "3",
+        "i": "3",
+        "a": "4"
+      },
+      "description": "Streaming speech; mouth driven by visemes."
+    },
+    "working": {
+      "clip": "work",
+      "blink": 0,
+      "fx": ["working"],
+      "description": "Long tool run in progress; she glitches with the work."
+    },
+    "amused": {
+      "clip": "idle",
+      "blinkClip": "idle_blink",
+      "blink": 3.0,
+      "description": "Something landed."
+    },
+    "annoyed": {
+      "clip": "glitch",
+      "blink": 0,
+      "fx": ["error"],
+      "description": "Tool failure or repeated retry."
+    },
+    "error": {
+      "clip": "glitch",
+      "blink": 0,
+      "fx": ["error"],
+      "description": "Daemon unreachable or turn failed."
+    },
+    "sleeping": {
+      "clip": "sleep",
+      "blink": 0,
+      "fx": ["sleeping"],
+      "description": "Core offline; projection idling down."
+    },
+    "walking": {
+      "clip": "walk",
+      "blink": 0,
+      "fx": ["walking"],
+      "description": "Crossing the desktop on her walk cycle."
+    },
+    "dragging": {
+      "clip": "dangle",
+      "blink": 0,
+      "fx": ["dragging"],
+      "description": "Held by the scruff of her chrome; legs dangling."
+    },
+    "clicked": {
+      "clip": "grin",
+      "blink": 0,
+      "description": "A quick glance back after a pat."
+    },
+    "dancing": {
+      "clip": "dance",
+      "blink": 0,
+      "fx": ["dancing"],
+      "description": "A short victory shuffle."
+    },
+    "waking": {
+      "clip": "wake",
+      "blink": 0,
+      "description": "Getting back on her feet."
+    },
+    "arriving": {
+      "clip": "idle",
+      "blink": 0,
+      "description": "Forming out of the landing drawings; her body is held back until the handoff."
+    },
+    "leaving": {
+      "clip": "leave",
+      "blink": 0,
+      "description": "Stepping out of frame."
+    }
+  }
+}

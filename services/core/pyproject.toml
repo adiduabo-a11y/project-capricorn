@@ -1,6 +1,6 @@
 [project]
 name = "capri-core"
-version = "0.1.0"
+version = "0.4.0"
 description = "Capri agent daemon: reasoning, memory, tools, voice, screen"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -10,6 +10,24 @@ dependencies = [
     "numpy>=2.0",
     "httpx>=0.27",
 ]
+
+[project.optional-dependencies]
+# Capri's own voice, on the CPU. Heavy (PyTorch), so it stays out of the default
+# install: uv sync --extra pocket --torch-backend cpu
+pocket = ["pocket-tts>=4.0.1"]
+# Kokoro-82M on CPU through onnxruntime (Apache-2.0 weights). sherpa-onnx
+# is the engine capri-desktop's voice pack uses; kokoro-onnx remains for the
+# public styles.
+kokoro = ["kokoro-onnx", "sherpa-onnx==2.0.1"]
+# Piper is the fast, smaller alternative voice path (optional weights).
+piper = ["piper-tts>=1.2"]
+# Windows screen control: UIA observation, fast capture and PNG redaction.
+screen = ["uiautomation>=2.0", "mss>=10.0", "Pillow>=10.0"]
+# Push-to-talk recognition. CPU int8; the small model downloads on first use.
+stt = ["faster-whisper>=1.1"]
+# OCR fallback for canvas/game surfaces, using the Windows OCR engine.
+# No Tesseract binary or extra language model is required on Windows 10/11.
+ocr = ["winocr>=0.0.15", "Pillow>=10.0"]
 
 [build-system]
 requires = ["hatchling"]

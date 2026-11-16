@@ -6,7 +6,7 @@ LM Studio first, e.g.:
 
     $env:CAPRI_MODELS__ENDPOINT = "http://127.0.0.1:1234/v1"
     $env:CAPRI_MODELS__STRUCTURED = "json_schema"
-    $env:CAPRI_MODELS__PLANNER__NAME = "google/gemma-4-e4b"
+    $env:CAPRI_MODELS__MODEL = "google/gemma-4-e4b"
     uv run python -m capri_core
 
 then:
@@ -65,7 +65,7 @@ async def main() -> int:
 
         models = await rpc(ws, "m", "models.status")
         status = models.get("result", {})
-        print(f"  .... endpoint={status.get('endpoint')} planner={status.get('planner')}")
+        print(f"  .... endpoint={status.get('endpoint')} model={status.get('model')}")
         print(f"  .... online={status.get('online')} structured={status.get('structured')}")
         check(bool(status.get("online")), "endpoint is serving models")
 

@@ -8,6 +8,7 @@ and no GPU. Enabled with ``CAPRI_FAKE_BRAIN=1``.
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Any
 
 from .. import paths
@@ -32,12 +33,31 @@ class ScriptedBrain:
 
     def __init__(self, workspace: str) -> None:
         self.workspace = workspace
+        # One fresh marker per daemon run: fs.write now refuses to overwrite,
+        # and the smoke must not depend on leftover state from last time.
+        self.marker = paths.capri_home() / "run" / f"smoke-{uuid.uuid4().hex[:8]}.txt"
 
     async def aclose(self) -> None:
         return None
 
     async def available(self) -> bool:
         return True
+
+    async def extract(
+        self, msgs: list[Msg], schema: dict[str, Any], **kwargs: Any
+    ) -> dict[str, Any]:
+        """One durable fact per scripted turn, enough to exercise the writer."""
+        return {
+            "items": [
+                {
+                    "kind": "fact",
+                    "text": "The smoke test exercises the memory writer.",
+                    "importance": 0.3,
+                    "confidence": 0.9,
+                    "entities": ["Capri"],
+                }
+            ]
+        }
 
     async def decide(
         self, msgs: list[Msg], specs: list[Any], persona_pack: str = "kyoko"
@@ -61,8 +81,7 @@ class ScriptedBrain:
             return {"path": "."}, _USAGE
         if spec.name == "fs.write":
             return {
-                "path": str(paths.capri_home() / "run" / "smoke.txt"),
+                "path": str(self.marker),
                 "content": f"capri smoke {int(time.time())}\n",
-                "mode": "append",
             }, _USAGE
         return {}, _USAGE

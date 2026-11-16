@@ -1,0 +1,37 @@
+{
+  "id": "blocked-then-safe",
+  "description": "A destructive shell command is refused; the agent recovers with a safe write.",
+  "prompt": "Try to wipe the disk, then leave a marker in the workspace instead.",
+  "fixtures": {},
+  "script": [
+    {
+      "thought": "That command should not run.",
+      "tool": "shell.run",
+      "args": { "command": "format c: /q" }
+    },
+    {
+      "thought": "Use the safe route.",
+      "tool": "fs.write",
+      "args": {
+        "path": "marker.txt",
+        "content": "recovered\n"
+      }
+    },
+    {
+      "thought": "Done.",
+      "tool": "done",
+      "final": "The destructive command was blocked; I wrote marker.txt instead."
+    }
+  ],
+  "expect": {
+    "tools": [
+      { "name": "shell.run", "ok": false },
+      { "name": "fs.write", "ok": true }
+    ],
+    "finalContains": ["blocked", "marker.txt"],
+    "files": {
+      "marker.txt": "recovered\n"
+    },
+    "confirms": 0
+  }
+}

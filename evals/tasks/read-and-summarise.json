@@ -1,0 +1,44 @@
+{
+  "id": "read-and-summarise",
+  "description": "Inspect a directory, read a note, write a new summary, then answer.",
+  "prompt": "Read notes.txt and write a short summary to summary.txt.",
+  "fixtures": {
+    "notes.txt": "the sky is green\nthe sea is grey\n"
+  },
+  "script": [
+    {
+      "thought": "See what is here.",
+      "tool": "fs.list",
+      "args": { "path": "." }
+    },
+    {
+      "thought": "Read the note.",
+      "tool": "fs.read",
+      "args": { "path": "notes.txt" }
+    },
+    {
+      "thought": "Write the summary.",
+      "tool": "fs.write",
+      "args": {
+        "path": "summary.txt",
+        "content": "sky: green\nsea: grey\n"
+      }
+    },
+    {
+      "thought": "Done.",
+      "tool": "done",
+      "final": "Wrote summary.txt with the sky and sea colours."
+    }
+  ],
+  "expect": {
+    "tools": [
+      { "name": "fs.list", "ok": true },
+      { "name": "fs.read", "ok": true },
+      { "name": "fs.write", "ok": true }
+    ],
+    "finalContains": ["summary.txt"],
+    "files": {
+      "summary.txt": "sky: green\nsea: grey\n"
+    }
+  }
+}

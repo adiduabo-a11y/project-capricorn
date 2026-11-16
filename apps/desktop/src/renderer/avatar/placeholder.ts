@@ -41,6 +41,7 @@ export interface CapriFigure {
   view: Container
   setState(name: string): void
   setMouth(viseme: string): void
+  setFacing(facing: 'left' | 'right'): void
   update(dtMs: number): void
   readonly state: string
 }
@@ -304,6 +305,9 @@ export function createCapri(pack: SpritePack): CapriFigure {
     view,
     setState,
     setMouth,
+    setFacing(next) {
+      figure.scale.x = next === 'left' ? -1 : 1
+    },
     update,
     get state() {
       return stateName

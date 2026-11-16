@@ -29,142 +29,482 @@ class _Base(BaseModel):
 # --------------------------------------------------------------------------- models
 
 
-class ModelCfg(_Base):
-    name: str
-    ctx: int = Field(default=8192, ge=512)
-    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-
-
 class EmbedCfg(_Base):
-    name: str = "bge-m3"
-    device: Literal["cpu", "gpu"] = "cpu"
-    dim: int = 1024
+    name: str = Field(
+        default="",
+        title="Embedding model",
+        description=(
+            "Optional embedding model ID. Leave blank to use whatever model "
+            "the server has loaded, or to use the hash fallback."
+        ),
+    )
+    dim: int = Field(
+        default=1024,
+        ge=1,
+        title="Embedding size",
+        description="Vector size returned by the embedding model.",
+    )
 
 
 class RerankCfg(_Base):
-    name: str = "bge-reranker-v2-m3"
-    device: Literal["cpu", "gpu"] = "cpu"
-    enabled: bool = True
-
-
-class GovernorCfg(_Base):
-    max_vram_gb: int = Field(default=14, ge=2, le=128)
-    keep_planner_resident: bool = True
+    name: str = Field(
+        default="",
+        title="Rerank model",
+        description="Optional rerank model ID; leave blank to use lexical reranking.",
+    )
+    enabled: bool = Field(
+        default=True,
+        title="Use reranking",
+        description="Try the server's rerank endpoint; fall back to lexical scoring.",
+    )
 
 
 class ModelsCfg(_Base):
-    endpoint: str = "http://127.0.0.1:8080/v1"
-    # Constrained decoding. `grammar` is llama.cpp's GBNF field; `json_schema`
-    # is the OpenAI-compatible response_format that LM Studio implements.
-    # `none` leaves it to the prompt.
-    structured: Literal["grammar", "json_schema", "none"] = "grammar"
-    # Qwen3 and friends spend the whole budget "thinking" and then emit nothing
-    # usable under a JSON grammar. llama-server accepts this template kwarg.
-    disable_thinking: bool = True
-
-    request_timeout_s: int = Field(default=180, ge=5, le=1800)
-    health_ttl_s: int = Field(default=10, ge=1, le=120)
-    planner: ModelCfg = Field(
-        default_factory=lambda: ModelCfg(
-            name="qwen3-14b-instruct-q4_k_m", ctx=16384, temperature=0.6
-        )
+    endpoint: str = Field(
+        default="",
+        title="Server URL",
+        description=(
+            "OpenAI-compatible base URL, for example "
+            "http://127.0.0.1:1234/v1 (LM Studio) or "
+            "http://127.0.0.1:8080/v1 (llama.cpp)."
+        ),
     )
-    reflex: ModelCfg = Field(
-        default_factory=lambda: ModelCfg(name="qwen3-8b-q4_k_m", ctx=8192, temperature=0.8)
+    model: str = Field(
+        default="",
+        title="Model ID",
+        description=(
+            "The model identifier shown by your server's /v1/models endpoint. "
+            "Use the same model for planning, replies, and background work."
+        ),
     )
-    vision: ModelCfg = Field(
-        default_factory=lambda: ModelCfg(name="qwen3-vl-4b-q4_k_m", ctx=8192, temperature=0.2)
+    temperature: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=2.0,
+        title="Temperature",
+        description="Default sampling temperature for chat and tool decisions.",
+    )
+    # Constrained decoding. `json_schema` is the portable OpenAI-compatible
+    # response_format; `grammar` is llama.cpp's GBNF fallback. `none` leaves
+    # it to the prompt.
+    structured: Literal["grammar", "json_schema", "none"] = Field(
+        default="json_schema",
+        title="Structured output",
+        description=(
+            "JSON schema is the default; use GBNF if llama.cpp rejects "
+            "response_format."
+        ),
+    )
+    disable_thinking: bool = Field(
+        default=False,
+        title="Disable thinking",
+        description=(
+            "Ask llama.cpp to disable the model's thinking template. "
+            "Useful for reasoning models that never finish their output."
+        ),
+    )
+    request_timeout_s: int = Field(
+        default=180,
+        ge=5,
+        le=1800,
+        title="Request timeout (seconds)",
+    )
+    health_ttl_s: int = Field(
+        default=10,
+        ge=1,
+        le=120,
+        title="Health check cache (seconds)",
     )
     embed: EmbedCfg = Field(default_factory=EmbedCfg)
     rerank: RerankCfg = Field(default_factory=RerankCfg)
-    governor: GovernorCfg = Field(default_factory=GovernorCfg)
+
+
+class ObservationCfg(_Base):
+    """How much of each tool result the planner gets to see, in characters.
+
+    A flat limit cannot serve both a file the agent must patch exactly and a
+    short error line. Shapes let a tool declare what it returns without
+    hardcoding a number inside the tool.
+    """
+
+    default: int = Field(default=1200, ge=200, le=200_000)
+    file: int = Field(default=8000, ge=200, le=200_000)
+    command: int = Field(
+        default=6000,
+        ge=200,
+        le=200_000,
+        description="Head and tail of command output; a failing test reports at the end.",
+    )
+    grep: int = Field(default=4000, ge=200, le=200_000)
+    tree: int = Field(default=2500, ge=200, le=200_000)
+    summary: int = Field(default=1500, ge=200, le=200_000)
+    screen: int = Field(default=3000, ge=200, le=200_000)
 
 
 class AgentCfg(_Base):
     max_steps: int = Field(default=24, ge=1, le=200)
+    # Ceiling on tool calls across the whole turn, independent of max_steps.
+    max_tool_calls_per_turn: int = Field(default=40, ge=1, le=400)
     max_wall_clock_s: int = Field(default=600, ge=10)
     context_budget_tokens: int = Field(default=12000, ge=1024)
-    one_tool_per_turn: bool = True
+    # The work profile gets more room: a six-step coding task is mostly
+    # observations. Effective budget is the minimum of this and the model's
+    # usable window.
+    work_context_budget_tokens: int = Field(default=24000, ge=1024)
     persona_pack: str = "kyoko"
     confirm_timeout_s: int = Field(default=180, ge=10, le=3600)
     history_messages: int = Field(default=30, ge=2, le=200)
+    observation: ObservationCfg = Field(default_factory=ObservationCfg)
 
 
 class MemoryCfg(_Base):
     extract_after_turn: bool = True
     decay_halflife_days: int = Field(default=30, ge=1)
-    max_semantic_items: int = Field(default=5000, ge=100)
+    # "endpoint" uses /v1/embeddings on the model server; "hash" is a
+    # deterministic local fallback for tests and offline work.
+    embed: Literal["endpoint", "hash"] = "endpoint"
+    recall_items: int = Field(default=8, ge=1, le=50)
+    recall_budget_tokens: int = Field(default=800, ge=100, le=4000)
+    dedupe_threshold: float = Field(default=0.92, ge=0.5, le=1.0)
+    contradiction_threshold: float = Field(default=0.80, ge=0.5, le=1.0)
+    prune_below: float = Field(default=0.05, ge=0.0, le=1.0)
 
 
 class RagCfg(_Base):
+    # Empty means "ingest into a collection called default" until the user
+    # names one explicitly.
     collections: list[str] = Field(default_factory=list)
     chunk_tokens: int = Field(default=700, ge=64)
     overlap_tokens: int = Field(default=80, ge=0)
     top_k: int = Field(default=40, ge=1, le=500)
     rerank_top_n: int = Field(default=8, ge=1, le=64)
+    # One cheap rewrite call before retrieval; multi_query adds up to 3 variants.
+    rewrite: bool = True
+    multi_query: bool = False
+    context_items: int = Field(default=6, ge=1, le=32)
+    context_budget_tokens: int = Field(default=1600, ge=200, le=8000)
+    max_doc_bytes: int = Field(default=2_000_000, ge=10_000)
 
 
 class BlendCfg(_Base):
     a: str = "af_bella"
-    b: str = "af_nicole"
-    mix: float = Field(default=0.55, ge=0.0, le=1.0)
 
 
 class DspCfg(_Base):
-    pitch: float = Field(default=-1.5, ge=-12.0, le=12.0)
-    formant: float = Field(default=1.04, ge=0.5, le=2.0)
-    bitcrush: float = Field(default=0.12, ge=0.0, le=1.0)
-    radio: float = Field(default=0.08, ge=0.0, le=1.0)
+    # Semitones. capri-desktop tunes her to +2 (their release notes: "She
+    # starts at pitch +2"), so that is where she starts here too: neutral reads
+    # as a different, lower voice. KokoroEngine compensates its tempo by this
+    # lift and then resamples; the other engines ignore it for now.
+    pitch: float = Field(default=2.0, ge=-12.0, le=12.0)
+    bitcrush: float = Field(default=0.0, ge=0.0, le=1.0)
+    radio: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Her robot: a sawtooth carrier on her nearest note with her spectral
+    # envelope, mixed under her at equal power. 0 is off, 1 is all robot.
+    robot: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Her voice layers, as capri-desktop has them: two copies of the finished
+    # voice, each pitched on its own and delayed, mixed under the dry signal.
+    # On by default: their preset leaves it opt-in, but the doubled voice is
+    # the one she is supposed to sound like. Level 0.4 is about 8 dB down.
+    layers: bool = True
+    layer_a_pitch: float = Field(default=2.0, ge=-12.0, le=12.0)
+    layer_a_delay: int = Field(default=25, ge=0, le=250)
+    layer_b_pitch: float = Field(default=-2.5, ge=-12.0, le=12.0)
+    layer_b_delay: int = Field(default=25, ge=0, le=250)
+    layer_level: float = Field(default=0.4, ge=0.0, le=1.0)
+
+
+class WakeCfg(_Base):
+    """Her name as the microphone's gate.
+
+    A wake that carries no request ("Capri?") opens one follow-up window
+    instead. The capture is the renderer's, so the timings live here where the
+    settings UI can reach them.
+    """
+
+    enabled: bool = True
+    # A wake candidate the recogniser is unsure about is not her name: a cough,
+    # the TV, or someone else's sentence should never become a request. Both
+    # limits are applied before the name is even matched.
+    min_confidence: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        title="Wake confidence",
+        description=(
+            "How sure the recogniser must be before an utterance counts as a "
+            "wake candidate. Raise it if she reacts to noise, lower it if she "
+            "ignores you in a noisy room."
+        ),
+    )
+    max_no_speech_prob: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        title="Reject silence",
+        description=(
+            "Reject a wake candidate the recogniser thinks contains no speech "
+            "at all, above this probability."
+        ),
+    )
+    # Silence that ends a captured utterance: long enough not to cut a sentence
+    # in half, short enough that a question feels answered quickly.
+    silence_ms: int = Field(default=700, ge=200, le=3000)
+    # `voice.calibrate` measures these two against the room and the voice; the
+    # defaults are what a quiet desk and a close microphone need.
+    threshold_rms: float = Field(
+        default=0.012,
+        ge=0.001,
+        le=0.2,
+        title="Speech threshold",
+        description=(
+            "How loud the microphone has to be before the gate opens. "
+            "Calibration puts this between the room's noise floor and your voice."
+        ),
+    )
+    min_utterance_ms: int = Field(
+        default=300,
+        ge=100,
+        le=1500,
+        title="Shortest utterance",
+        description=(
+            "Sounds shorter than this never become a wake candidate. "
+            "Calibration sets it from how long your \"Capri\" actually takes."
+        ),
+    )
+    # A bare name, and every command that follows it, leave this long for the
+    # sentence after it — the window that keeps "Capri" from being repeated.
+    follow_up_ms: int = Field(
+        default=6000,
+        ge=1000,
+        le=20000,
+        title="Follow-up window",
+        description=(
+            "How long the microphone stays open for your next sentence after her "
+            "name, and after each command, without saying “Capri” again."
+        ),
+    )
 
 
 class VoiceCfg(_Base):
-    tts: Literal["kokoro", "piper", "chatterbox"] = "kokoro"
+    enabled: bool = True
+    # "tone" is the offline placeholder: same pipeline, no weights. It never
+    # substitutes itself for a missing Kokoro install.
+    tts: Literal["kokoro", "piper", "chatterbox", "pocket", "tone"] = "kokoro"
+    # Empty means <capri home>/models/kokoro.
+    model_dir: str = ""
+    # Chatterbox clone target. Empty means <capri home>/models/chatterbox/capri-reference.wav.
+    # Only ever a clip the user has the rights to; `--voice-reference` renders
+    # Capri's own from the synthetic Kokoro blend.
+    reference_clip: str = ""
+    # Pocket voice state. Empty means <capri home>/models/pocket/capri_english.safetensors.
+    voice_file: str = ""
+    # Piper .onnx voice. Empty means <capri home>/models/piper/en_US-lessac-medium.onnx.
+    piper_voice: str = ""
+    # Two-letter code for the Pocket language table (en, es, fr, de, it, pt, nl).
+    language: str = "en"
     voice_blend: BlendCfg = Field(default_factory=BlendCfg)
-    speed: float = Field(default=1.02, ge=0.5, le=2.0)
+    speed: float = Field(default=1.2, ge=0.5, le=2.0)
     dsp: DspCfg = Field(default_factory=DspCfg)
+    # Finished segments held ahead of the consumer.
+    queue_depth: int = Field(default=2, ge=1, le=8)
+    sentence_max_chars: int = Field(default=240, ge=40, le=1000)
+    viseme_fps: int = Field(default=15, ge=5, le=30)
     stt: str = "faster-whisper-small-int8"
+    # Empty means <capri home>/models/whisper. The model downloads on first use.
+    stt_model_dir: str = ""
+    stt_compute_type: Literal["int8", "int8_float16", "float16", "float32"] = "int8"
     barge_in: bool = True
-    wake_word: str | None = None
+    # Renderer energy gate for barge-in: RMS threshold and how long it must hold.
+    barge_threshold: float = Field(default=0.018, ge=0.002, le=0.2)
+    barge_hold_ms: int = Field(default=120, ge=40, le=800)
+    wake: WakeCfg = Field(default_factory=WakeCfg)
 
 
 class AvatarCfg(_Base):
-    pack: str = "capri-placeholder"
-    scale: float = Field(default=1.0, ge=0.5, le=2.0)
     always_on_top: bool = True
-    click_through: bool = True
     edge_snap: bool = True
-    mood_default: str = "neutral"
+
+
+class ScreenCfg(_Base):
+    enabled: bool = True
+    # How long a screen action waits for the UIA tree to stop changing.
+    settle_ms: int = Field(default=3000, ge=200, le=10_000)
+    max_elements: int = Field(default=300, ge=20, le=2000)
+    max_depth: int = Field(default=8, ge=1, le=20)
+    capture: bool = True
+    redact_passwords: bool = True
+    # A visual second signal when the UIA tree does not change (canvas/game).
+    pixel_diff: bool = True
+    pixel_threshold: float = Field(default=0.002, ge=0.0, le=0.5)
+    # Extra attempts for an idempotent action whose expected change never arrived.
+    retries: int = Field(default=2, ge=0, le=4)
+    # Windows OCR language tag (the OS language pack must be installed).
+    ocr_language: str = "en"
+    vision: Literal["auto", "on", "off"] = Field(
+        default="auto",
+        title="Visual context",
+        description=(
+            "auto: attach the redacted screenshot only when the model name is "
+            "known to see images. on: always attach. off: never attach; the "
+            "accessibility tree and OCR text still describe the window."
+        ),
+    )
 
 
 class ConfirmCfg(_Base):
     destructive: Literal["always", "never"] = "always"
-    purchase: Literal["always", "block"] = "block"
-    passwords: Literal["always", "block"] = "block"
+    # auto: a reviewer model may skip the question for a destructive call it
+    # judges safe and undoable. off: every destructive call asks.
+    review: Literal["auto", "off"] = "auto"
+    review_timeout_s: float = Field(default=6.0, ge=1.0, le=30.0)
+
+
+def _home_path(*parts: str) -> str:
+    return str(Path.home().joinpath(*parts))
+
+
+def _roaming_appdata() -> str:
+    """``%APPDATA%``, or the same place built from the home directory."""
+    raw = os.environ.get("APPDATA")
+    if raw:
+        return raw
+    return _home_path("AppData", "Roaming")
+
+
+def _default_allow_paths() -> list[str]:
+    """The ambient roots: where a user's projects and documents live."""
+    return [_home_path("projects"), _home_path("Documents")]
+
+
+def _default_deny_paths() -> list[str]:
+    """What the harness never reads, derived from the current user.
+
+    These must follow the machine: a deny list built from one user's home
+    protects nothing on anyone else's.
+    """
+    deny = [_roaming_appdata(), _home_path(".ssh"), "**/*.kdbx"]
+    system_root = os.environ.get("SystemRoot") if os.name == "nt" else ""
+    if system_root:
+        deny.insert(0, system_root)
+    return deny
+
+
+class McpServerCfg(_Base):
+    """One MCP server: a command to launch, and how much to trust it."""
+
+    command: str = Field(default="", description="Executable to launch, e.g. npx or uvx.")
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    cwd: str = ""
+    enabled: bool = True
+    # Everything a server offers confirms by default: the daemon cannot know
+    # what a third-party tool does to the machine.
+    tier: int = Field(default=2, ge=0, le=3)
+    timeout_s: float = Field(default=30.0, ge=1.0, le=300.0)
+    max_calls_per_turn: int = Field(default=4, ge=1, le=50)
+
+
+class McpCfg(_Base):
+    """Model Context Protocol servers whose tools join the registry."""
+
+    enabled: bool = True
+    startup_timeout_s: float = Field(default=15.0, ge=1.0, le=120.0)
+    servers: dict[str, McpServerCfg] = Field(default_factory=dict)
 
 
 class PolicyCfg(_Base):
     profile: Literal["focus", "work", "chatty", "silent"] = "focus"
     # Relative tool paths resolve here. Empty means the daemon's cwd.
     workspace: str = ""
-    allow_paths: list[str] = Field(
-        default_factory=lambda: [
-            "C:/Users/daeme/projects",
-            "C:/Users/daeme/Documents",
-        ]
-    )
-    deny_paths: list[str] = Field(
-        default_factory=lambda: [
-            "C:/Windows",
-            "C:/Users/daeme/.ssh",
-            "**/*.kdbx",
-            "**/AppData/Roaming/**",
-        ]
-    )
-    allow_hosts: list[str] = Field(default_factory=list)
+    allow_paths: list[str] = Field(default_factory=_default_allow_paths)
+    deny_paths: list[str] = Field(default_factory=_default_deny_paths)
     screen_allow_apps: list[str] = Field(
         default_factory=lambda: ["chrome.exe", "code.exe", "explorer.exe", "notepad.exe"]
     )
+    workspace_edits: Literal["allow", "confirm"] = Field(
+        default="allow",
+        title="Workspace edits",
+        description=(
+            "allow: writes inside the open project run without a prompt. "
+            "confirm: every write inside it asks first."
+        ),
+    )
+    trust_persisted_workspace: bool = Field(
+        default=True,
+        title="Trust a reopened project",
+        description=(
+            "Keep write trust when a project is restored after a restart. "
+            "False reopens it read-only until you open it again."
+        ),
+    )
     confirm: ConfirmCfg = Field(default_factory=ConfirmCfg)
+
+
+class SchedulerCfg(_Base):
+    # Idle maintenance only runs after this many seconds without a turn.
+    enabled: bool = True
+    interval_s: int = Field(default=900, ge=30, le=86_400)
+    idle_s: int = Field(default=120, ge=10, le=86_400)
+    journal_episodes: bool = True
+    # Zero keeps the corresponding rows forever.
+    episode_retention_days: int = Field(default=90, ge=0, le=3650)
+    trace_retention_days: int = Field(default=30, ge=0, le=3650)
+
+
+class CompanionCfg(_Base):
+    """Ambient commentary about the foreground activity."""
+
+    enabled: bool = True
+    # The first line lands quickly; later ones are deliberately spaced out.
+    initial_s: int = Field(default=45, ge=10, le=3600)
+    interval_s: int = Field(default=180, ge=30, le=86_400)
+    # A comment needs recent keyboard or mouse input, not just an open window.
+    active_within_s: int = Field(default=120, ge=10, le=86_400)
+    # A long session in one window still gets an occasional check-in, just
+    # much less often than a change of activity does.
+    repeat_s: int = Field(default=900, ge=60, le=86_400)
+    # A hard ceiling so a burst of window switching cannot turn her into a
+    # stream of notifications.
+    max_per_hour: int = Field(default=8, ge=1, le=60)
+    speak: bool = True
+    # She may also start a conversation of her own, not only comment on what is
+    # on the screen. This is the switch for that; the cadence is irregular.
+    chatter: bool = Field(
+        default=True,
+        title="Talk to me",
+        description=(
+            "When on, she sometimes starts a conversation of her own - a question "
+            "or a thought aimed at you - not only a line about the window."
+        ),
+    )
+    # Base gap between conversations; each one is jittered, so it never lands
+    # on a schedule.
+    chatter_interval_s: int = Field(default=900, ge=120, le=86_400)
+    # While a task is running she may think out loud about the step she is on.
+    # This is narration, not the answer: no tool, no claim, no result.
+    work_chatter: bool = Field(
+        default=True,
+        title="Comment on her own work",
+        description=(
+            "When on, she says a short line now and then while a task runs, and "
+            "one when a scheduled maintenance pass finishes."
+        ),
+    )
+    # One line, then quiet for this long: a long turn is not a monologue.
+    work_interval_s: int = Field(default=45, ge=10, le=3600)
+    # A hard ceiling per turn, so a forty-step turn still sounds like a companion.
+    work_max_per_turn: int = Field(default=3, ge=1, le=10)
+    # How much of the work is allowed into an ambient line. windows reads the
+    # foreground title only; screen also lets the OCR of that window in.
+    awareness: Literal["off", "windows", "screen"] = Field(
+        default="windows",
+        title="Awareness",
+        description=(
+            "off: no ambient commentary. windows: foreground app and title plus "
+            "the open project and task. screen: also reads the text on screen "
+            "so a line can refer to it (password regions are redacted)."
+        ),
+    )
 
 
 class ServerCfg(_Base):
@@ -174,15 +514,54 @@ class ServerCfg(_Base):
 
 
 class CapriConfig(_Base):
-    version: int = 1
-    models: ModelsCfg = Field(default_factory=ModelsCfg)
-    agent: AgentCfg = Field(default_factory=AgentCfg)
-    memory: MemoryCfg = Field(default_factory=MemoryCfg)
-    rag: RagCfg = Field(default_factory=RagCfg)
-    voice: VoiceCfg = Field(default_factory=VoiceCfg)
-    avatar: AvatarCfg = Field(default_factory=AvatarCfg)
-    policy: PolicyCfg = Field(default_factory=PolicyCfg)
-    server: ServerCfg = Field(default_factory=ServerCfg)
+    models: ModelsCfg = Field(
+        default_factory=ModelsCfg,
+        description="The local LM Studio or llama.cpp server that powers the brain.",
+    )
+    agent: AgentCfg = Field(
+        default_factory=AgentCfg,
+        description="Turn limits, context budget, and the active persona.",
+    )
+    memory: MemoryCfg = Field(
+        default_factory=MemoryCfg,
+        description="How Capri stores, recalls, and forgets what she learns.",
+    )
+    rag: RagCfg = Field(
+        default_factory=RagCfg,
+        description="Document indexing, retrieval, and citation behavior.",
+    )
+    voice: VoiceCfg = Field(
+        default_factory=VoiceCfg,
+        description="Text-to-speech, speech-to-text, and voice effects.",
+    )
+    avatar: AvatarCfg = Field(
+        default_factory=AvatarCfg,
+        description="Sprite pack, scale, and window behavior.",
+    )
+    screen: ScreenCfg = Field(
+        default_factory=ScreenCfg,
+        description="Desktop observation, UI actions, and pixel verification.",
+    )
+    policy: PolicyCfg = Field(
+        default_factory=PolicyCfg,
+        description="Tool permissions, workspace paths, and confirmation rules.",
+    )
+    mcp: McpCfg = Field(
+        default_factory=McpCfg,
+        description="MCP servers whose tools Capri can call.",
+    )
+    scheduler: SchedulerCfg = Field(
+        default_factory=SchedulerCfg,
+        description="Idle maintenance, journaling, and retention.",
+    )
+    companion: CompanionCfg = Field(
+        default_factory=CompanionCfg,
+        description="Ambient comments about the activity on screen.",
+    )
+    server: ServerCfg = Field(
+        default_factory=ServerCfg,
+        description="Loopback daemon address and local authentication.",
+    )
 
 
 # --------------------------------------------------------------------------- loading
@@ -241,12 +620,120 @@ def env_overrides() -> dict[str, Any]:
     return out
 
 
+_OLD_MODEL_PRESETS = {
+    "qwen3-14b-instruct-q4_k_m",
+    "qwen3-8b-q4_k_m",
+    "qwen3-vl-4b-q4_k_m",
+}
+_OLD_EMBED_PRESETS = {"bge-m3"}
+_OLD_RERANK_PRESETS = {"bge-reranker-v2-m3"}
+
+
+def _migrate_model_config(data: dict[str, Any]) -> dict[str, Any]:
+    """Collapse role presets into one user-supplied brain model.
+
+    Older configs had planner/reflex/vision objects with baked-in Qwen model
+    names. Those names are intentionally not carried forward: the user now
+    chooses the model in LM Studio or llama.cpp. A non-preset custom planner or
+    reflex name is preserved so an explicit choice is not lost.
+    """
+    out = copy.deepcopy(data)
+    models = out.get("models")
+    if not isinstance(models, dict):
+        return out
+
+    old_planner = models.pop("planner", None)
+    old_reflex = models.pop("reflex", None)
+    models.pop("vision", None)
+    models.pop("governor", None)
+
+    if not models.get("model"):
+        candidates: list[str] = []
+        for old in (old_planner, old_reflex):
+            if not isinstance(old, dict):
+                continue
+            name = str(old.get("name") or "").strip()
+            if name and name not in _OLD_MODEL_PRESETS:
+                candidates.append(name)
+        if candidates:
+            models["model"] = candidates[0]
+
+    if "temperature" not in models and isinstance(old_planner, dict):
+        temperature = old_planner.get("temperature")
+        if isinstance(temperature, (int, float)):
+            models["temperature"] = float(temperature)
+
+    embed = models.get("embed")
+    if isinstance(embed, dict):
+        embed.pop("device", None)
+        if str(embed.get("name") or "") in _OLD_EMBED_PRESETS:
+            embed["name"] = ""
+
+    rerank = models.get("rerank")
+    if isinstance(rerank, dict):
+        rerank.pop("device", None)
+        if str(rerank.get("name") or "") in _OLD_RERANK_PRESETS:
+            rerank["name"] = ""
+
+    return out
+
+
+def _drop_retired_config(data: dict[str, Any]) -> dict[str, Any]:
+    """Remove fields that no longer have a runtime consumer.
+
+    Existing config files are full dumps, so accepting an old file must not
+    fail just because a retired switch is still present. These keys are dropped
+    rather than silently kept in the schema where the settings UI would show a
+    control that does nothing.
+    """
+    out = copy.deepcopy(data)
+    out.pop("version", None)
+
+    agent = out.get("agent")
+    if isinstance(agent, dict):
+        agent.pop("one_tool_per_turn", None)
+
+    memory = out.get("memory")
+    if isinstance(memory, dict):
+        memory.pop("max_semantic_items", None)
+
+    voice = out.get("voice")
+    if isinstance(voice, dict):
+        voice.pop("wake_word", None)
+        blend = voice.get("voice_blend")
+        if isinstance(blend, dict):
+            blend.pop("b", None)
+            blend.pop("mix", None)
+        dsp = voice.get("dsp")
+        if isinstance(dsp, dict):
+            dsp.pop("formant", None)
+
+    avatar = out.get("avatar")
+    if isinstance(avatar, dict):
+        avatar.pop("pack", None)
+        avatar.pop("scale", None)
+        avatar.pop("mood_default", None)
+        # Click-through is the pet window's own hit region now, not a setting.
+        avatar.pop("click_through", None)
+
+    policy = out.get("policy")
+    if isinstance(policy, dict):
+        policy.pop("allow_hosts", None)
+        confirm = policy.get("confirm")
+        if isinstance(confirm, dict):
+            confirm.pop("purchase", None)
+            confirm.pop("passwords", None)
+
+    return out
+
+
 def load_config(project_dir: Path | None = None) -> CapriConfig:
     data: dict[str, Any] = {}
     data = deep_merge(data, _read_yaml(paths.config_path()))
     if project_dir is not None:
         data = deep_merge(data, _read_yaml(project_dir / ".capri.yaml"))
     data = deep_merge(data, env_overrides())
+    data = _drop_retired_config(_migrate_model_config(data))
     try:
         return CapriConfig.model_validate(data)
     except ValidationError as exc:  # surface the file, not just the field

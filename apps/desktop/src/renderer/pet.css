@@ -1,0 +1,192 @@
+.pet-root {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: transparent;
+  pointer-events: none;
+}
+
+.pet-actor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 200px;
+  height: 300px;
+  pointer-events: auto;
+  /* A barely-there surface keeps Windows hit-testing the sprite region instead
+     of treating the whole transparent window as click-through. */
+  background: rgba(10, 10, 16, 0.004);
+  cursor: grab;
+  touch-action: none;
+  will-change: transform;
+  user-select: none;
+}
+
+.pet-actor[data-placed='false'] {
+  opacity: 0;
+}
+
+.pet-actor:active {
+  cursor: grabbing;
+}
+
+.pet-actor .avatar {
+  position: absolute;
+  inset: 0;
+}
+
+.pet-root[data-mode='drag'] {
+  pointer-events: auto;
+}
+
+.pet-root[data-mode='drag'] .pet-actor {
+  cursor: grabbing;
+}
+
+/* ----------------------------------------------------- teleport ribbons */
+
+/*
+ * Her ribbons: the hair and accent lines that wind up where she stood and
+ * stream to the landing spot. They are what show where she will be, so they
+ * sit over the desktop and under the arrival burst, and never take a pointer.
+ */
+
+.ribbon-trip {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: visible;
+  pointer-events: none;
+  /* Held at full strength until she has landed and started to form, then
+     taken out as her body resolves out of the landing pulse. */
+  animation: ribbon-fade 300ms linear 540ms forwards;
+}
+
+.ribbon-trip .ribbon-strand,
+.ribbon-trip .ribbon-flecks {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: ribbon-stream 500ms cubic-bezier(0.32, 0.64, 0.38, 1) forwards;
+}
+
+/* Her hair carries white flecks, as in the source ribbons: a sparse dash that
+   slides with the strand instead of a second solid line. */
+.ribbon-trip .ribbon-flecks {
+  stroke-dasharray: 0.006 0.026;
+  animation: ribbon-flecks 520ms linear forwards;
+}
+
+.ribbon-ball {
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ribbon-gather 200ms ease-out forwards;
+}
+
+.ribbon-land {
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ribbon-land 380ms ease-out 480ms forwards;
+}
+
+@keyframes ribbon-fade {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes ribbon-stream {
+  0% {
+    stroke-dashoffset: 1;
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+}
+
+@keyframes ribbon-flecks {
+  0% {
+    stroke-dashoffset: 1;
+    opacity: 0;
+  }
+  30% {
+    opacity: 0.85;
+  }
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 0.85;
+  }
+}
+
+@keyframes ribbon-gather {
+  0% {
+    opacity: 0;
+    transform: scale(0.2);
+  }
+  55% {
+    opacity: 0.9;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+}
+
+@keyframes ribbon-land {
+  0% {
+    opacity: 0;
+    transform: scale(0.3);
+  }
+  35% {
+    opacity: 0.95;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.5);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ribbon-trip {
+    display: none;
+  }
+}
+
+/* --------------------------------------------------- forming (form.png) */
+
+/*
+ * The landing drawings from capri-desktop: Qewiw's nine-cell transformation,
+ * played by FormArrival at twenty-four cells a second. It sits under the
+ * ribbon and takes no pointer.
+ */
+
+.form-arrival {
+  position: absolute;
+  z-index: 2;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+
+/* The stage keeps filling her box through this wrapper, so veiling the wrapper
+ * cannot collapse the canvas. */
+.pet-body {
+  position: absolute;
+  inset: 0;
+}
+
+/* Her own body is held back until the drawings hand over to it. The drawings
+ * themselves live beside it, not inside it, so they stay on screen. */
+.pet-actor.is-veiled .pet-body {
+  opacity: 0;
+}

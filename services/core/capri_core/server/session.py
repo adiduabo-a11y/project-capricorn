@@ -30,6 +30,10 @@ class Session:
     id: str = field(default_factory=lambda: f"ses_{uuid.uuid4().hex[:12]}")
     created_at: int = field(default_factory=_now_ms)
     turns: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    # A chat opened by `session.new` starts detached: it does not inherit the
+    # task that was already open. A work request in it creates its own task,
+    # and only `task.continue` adopts an existing one.
+    adopt_open_task: bool = True
 
     @classmethod
     def create(cls, conn: sqlite3.Connection, subject: str = paths.DEFAULT_SUBJECT) -> Session:
@@ -47,11 +51,22 @@ class Session:
         tool_name: str | None = None,
         tool_args: str | None = None,
         tool_result: str | None = None,
+        task_id: str | None = None,
     ) -> int:
         cur = self.conn.execute(
             "INSERT INTO messages (episode_id, turn_id, role, content, tool_name,"
-            " tool_args, tool_result, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (self.episode_id, turn_id, role, content, tool_name, tool_args, tool_result, _now_ms()),
+            " tool_args, tool_result, task_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                self.episode_id,
+                turn_id,
+                role,
+                content,
+                tool_name,
+                tool_args,
+                tool_result,
+                task_id or None,
+                _now_ms(),
+            ),
         )
         return int(cur.lastrowid or 0)
 

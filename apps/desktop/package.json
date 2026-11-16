@@ -1,16 +1,23 @@
 {
   "name": "@capri/desktop",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
-  "description": "Capri's projection layer: avatar, speech bubble, settings",
+  "description": "Project Capricorn's projection layer: avatar, speech bubble, settings",
+  "author": "Project Capricorn",
+  "productName": "Project Capricorn",
   "main": "main.mjs",
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "vite build",
     "start": "electron .",
     "smoke": "npm run build && node scripts/smoke.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:voice": "tsc src/renderer/audio/segmenter.ts src/renderer/audio/preroll.ts --outDir ../../.live/voice-segmenter --module commonjs --target es2022 --skipLibCheck && node scripts/voice-segmenter-check.cjs ../../.live/voice-segmenter",
+    "test:worklet": "npm run build && node scripts/capture-worklet-check.cjs",
+    "sidecar": "node scripts/build-sidecar.mjs",
+    "dist": "npm run build && npm run sidecar && electron-builder --win nsis",
+    "dist:dir": "npm run build && npm run sidecar && electron-builder --dir"
   },
   "dependencies": {
     "pixi.js": "^8.6.6",
@@ -23,6 +30,7 @@
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^33.2.0",
+    "electron-builder": "^26.18.0",
     "typescript": "^5.7.2",
     "vite": "^5.4.11"
   }

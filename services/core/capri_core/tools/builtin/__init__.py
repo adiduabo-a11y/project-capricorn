@@ -1,5 +1,5 @@
 """Built-in tools that ship with the daemon."""
 
-from . import fs, shell
+from . import avatar, fs, process, screen, shell
 
-__all__ = ["fs", "shell"]
+__all__ = ["avatar", "fs", "process", "screen", "shell"]

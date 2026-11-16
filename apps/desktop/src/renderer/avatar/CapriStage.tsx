@@ -7,10 +7,14 @@ import 'pixi.js/unsafe-eval'
 
 import { createCapri, type CapriFigure } from './placeholder'
 import { loadPack } from './pack'
+import { createSpriteCapri } from './sprite'
 
 interface Props {
   packName: string
   state: string
+  /** Current viseme from the speech player; only the talking state uses it. */
+  mouth?: string | null
+  facing?: 'left' | 'right'
   onReady?: () => void
 }
 
@@ -18,12 +22,18 @@ interface Props {
  * Owns the WebGL stage. Mounts once per pack, then only pushes state changes
  * into the figure — no re-render churn, no context leaks.
  */
-export function CapriStage({ packName, state, onReady }: Props) {
+export function CapriStage({ packName, state, mouth, facing = 'right', onReady }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const figureRef = useRef<CapriFigure | null>(null)
   const readyRef = useRef(onReady)
+  const stateRef = useRef(state)
+  const mouthRef = useRef(mouth ?? 'closed')
+  const facingRef = useRef(facing)
 
   readyRef.current = onReady
+  stateRef.current = state
+  mouthRef.current = mouth ?? 'closed'
+  facingRef.current = facing
 
   useEffect(() => {
     const host = hostRef.current
@@ -56,15 +66,23 @@ export function CapriStage({ packName, state, onReady }: Props) {
 
       host.appendChild(instance.canvas)
 
-      const figure = createCapri(pack)
+      const figure =
+        pack.provider === 'sprite' ? await createSpriteCapri(pack) : createCapri(pack)
+      if (disposed) {
+        figure.view.destroy({ children: true })
+        instance.destroy(true, { children: true })
+        return
+      }
       figureRef.current = figure
-      figure.setState(state)
+      figure.setState(stateRef.current)
+      figure.setMouth(mouthRef.current)
+      figure.setFacing(facingRef.current)
       instance.stage.addChild(figure.view)
 
       const layout = () => {
         const width = host.clientWidth || 1
         const height = host.clientHeight || 1
-        const scale = Math.min((width * 0.92) / pack.canvas[0], height / pack.canvas[1])
+        const scale = Math.min((width * 0.96) / pack.canvas[0], (height * 0.99) / pack.canvas[1])
         figure.view.scale.set(scale)
         figure.view.position.set(width / 2, height - 2)
       }
@@ -101,5 +119,21 @@ export function CapriStage({ packName, state, onReady }: Props) {
     figureRef.current?.setState(state)
   }, [state])
 
-  return <div className="avatar" ref={hostRef} aria-label="Capri projection" />
+  useEffect(() => {
+    figureRef.current?.setMouth(mouth ?? 'closed')
+  }, [mouth])
+
+  useEffect(() => {
+    figureRef.current?.setFacing(facing)
+  }, [facing])
+
+  return (
+    <div
+      className="avatar"
+      ref={hostRef}
+      aria-label="Capri projection"
+      data-state={state}
+      data-mouth={mouth ?? 'closed'}
+    />
+  )
 }

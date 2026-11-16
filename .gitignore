@@ -4,6 +4,9 @@ dist/
 dist-electron/
 out/
 build/
+apps/desktop/resources/
+apps/desktop/release/
+apps/desktop/release-obsolete/
 *.log
 
 # Python
@@ -43,5 +46,9 @@ desktop.ini
 .smoke.png
 .smoke-flat.png
 .smoke-confirm.png
+.smoke-pet.png
 .live/
 
+
+# Vendor tool scratch (Windows UI automation logs)
+@AutomationLog.txt

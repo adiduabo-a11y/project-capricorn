@@ -30,6 +30,16 @@ def shards_dir() -> Path:
     return capri_home() / "shards"
 
 
+def models_dir() -> Path:
+    """Local model weights (Kokoro, reranker, future vision models)."""
+    return capri_home() / "models"
+
+
+def blackwall_dir() -> Path:
+    """Proposed, installed and quarantined dynamic tools."""
+    return capri_home() / "blackwall"
+
+
 def config_path() -> Path:
     return capri_home() / "config.yaml"
 

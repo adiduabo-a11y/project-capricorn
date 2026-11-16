@@ -17,10 +17,12 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from capri_core.agent.loop import TurnRunner
+from capri_core.agent import prompt as prompt_mod
+from capri_core.agent.loop import TurnRunner, _event
 from capri_core.agent.types import ChatResult, Decision
 from capri_core.config import CapriConfig, PolicyCfg
 from capri_core.models import gbnf
+from capri_core.server import protocol
 from capri_core.server.session import Session
 from capri_core.store import db
 from capri_core.tools import Policy, builtin_registry
@@ -125,11 +127,23 @@ def test_policy(workspace: str, cfg: PolicyCfg) -> None:
     registry = builtin_registry()
 
     read = registry.get("fs.read")
+    grep = registry.get("fs.grep")
     write = registry.get("fs.write")
     shell = registry.get("shell.run")
-    assert read and write and shell
+    assert read and grep and write and shell
 
     check(policy.check(read, {"path": "x.txt"}).verdict == "allow", "reads are free")
+    check(
+        policy.check(grep, {"pattern": "x"}).verdict == "allow",
+        "grep in the workspace is free",
+    )
+    check(
+        policy.check(
+            grep, {"pattern": "x", "path": "C:/Users/daeme/.ssh/id_rsa"}
+        ).verdict
+        == "block",
+        "grep cannot search denied files",
+    )
     check(
         policy.check(write, {"path": "new.txt", "content": "hi"}).verdict == "allow",
         "writing inside the workspace is allowed",
@@ -176,8 +190,10 @@ async def test_three_step_turn(tmp: Path, config: CapriConfig) -> None:
         ({"thought": "Look first.", "tool": "fs.list"}, {"path": str(tmp)}),
         ({"thought": "Read the notes.", "tool": "fs.read"}, {"path": str(notes)}),
         (
-            {"thought": "Write the summary.", "tool": "fs.write"},
-            {"path": str(out), "content": "sky=green", "mode": "overwrite"},
+            # fs.write only creates; changing an existing file goes through
+            # fs.patch, which preserves encoding and leaves an undo record.
+            {"thought": "Correct the summary.", "tool": "fs.patch"},
+            {"path": str(out), "edits": [{"old": "old contents", "new": "sky=green"}]},
         ),
         ({"thought": "Done.", "tool": "done", "final": "Wrote it."}, None),
     ]
@@ -185,16 +201,19 @@ async def test_three_step_turn(tmp: Path, config: CapriConfig) -> None:
 
     tools = harness.of_type("agent.tool")
     names = [t["name"] for t in tools]
-    check(names == ["fs.list", "fs.read", "fs.write"], f"tools ran in order: {names}")
+    check(names == ["fs.list", "fs.read", "fs.patch"], f"tools ran in order: {names}")
     check(all(t["ok"] for t in tools), "every tool reported ok")
 
     check(len(harness.confirms) == 1, "exactly one confirmation was requested")
     if harness.confirms:
         request = harness.confirms[0]
-        check(request["tool"] == "fs.write", "confirmation names the tool")
+        check(request["tool"] == "fs.patch", "confirmation names the tool")
         check(request["tierName"] == "act.destructive", "confirmation shows the tier")
 
-    check(out.exists() and out.read_text(encoding="utf-8") == "sky=green", "file was written")
+    check(
+        out.exists() and out.read_text(encoding="utf-8").strip() == "sky=green",
+        "file was patched",
+    )
 
     done = harness.of_type("agent.done")
     check(bool(done) and done[-1]["text"] == "Wrote it.", "final answer streamed")
@@ -250,6 +269,224 @@ async def test_stall_guard(tmp: Path, config: CapriConfig) -> None:
     conn.close()
 
 
+async def test_casual_turn_no_tools(tmp: Path, config: CapriConfig) -> None:
+    """Talking must not cost a tool call, so no work block is invented."""
+    conn = open_test_shard()
+    session = Session.create(conn)
+    brain = FakeBrain([({"thought": "", "tool": "done", "final": "Evening."}, None)])
+    harness = await run_turn(config, session, brain, str(tmp))
+
+    check(harness.of_type("agent.tool") == [], "casual turn makes no tool calls")
+    check(harness.of_type("agent.done")[-1]["text"] == "Evening.", "casual turn answers")
+    conn.close()
+
+
+async def test_turn_carries_work_ids(tmp: Path, config: CapriConfig) -> None:
+    """Every tool event and trace row is attributable to a workspace and task."""
+    conn = open_test_shard()
+    session = Session.create(conn)
+    (tmp / "a.txt").write_text("x\n", encoding="utf-8")
+
+    work = prompt_mod.WorkContext(
+        workspace_id="wsp_test", task_id="tsk_test", name="demo", root=str(tmp)
+    )
+    brain = FakeBrain(
+        [
+            ({"thought": "Look.", "tool": "fs.list"}, {"path": str(tmp)}),
+            ({"thought": "Done.", "tool": "done", "final": "Listed."}, None),
+        ]
+    )
+    harness = Harness()
+    runner = TurnRunner(
+        config=config,
+        conn=conn,
+        session=session,
+        emit=harness.emit,
+        confirm=harness.confirm,
+        brain=brain,
+        registry=builtin_registry(),
+        policy=Policy(config.policy, str(tmp)),
+        workspace=str(tmp),
+        work=work,
+    )
+    await runner.run("trn_work", "list it")
+
+    tools = harness.of_type("agent.tool")
+    check(len(tools) == 1, "one tool ran")
+    check(
+        bool(tools) and tools[0]["workspaceId"] == "wsp_test" and tools[0]["taskId"] == "tsk_test",
+        "tool events carry workspace and task ids",
+    )
+    done = harness.of_type("agent.done")[-1]
+    check(
+        done["workspaceId"] == "wsp_test" and done["taskId"] == "tsk_test",
+        "the final event carries workspace and task ids",
+    )
+
+    rows = conn.execute(
+        "SELECT workspace_id, task_id FROM traces WHERE turn_id = 'trn_work'"
+    ).fetchall()
+    check(
+        len(rows) == 2
+        and all(row["workspace_id"] == "wsp_test" and row["task_id"] == "tsk_test" for row in rows),
+        "trace rows carry workspace and task ids",
+    )
+
+    msgs = conn.execute("SELECT task_id FROM messages WHERE turn_id = 'trn_work'").fetchall()
+    check(
+        len(msgs) == 3 and all(row["task_id"] == "tsk_test" for row in msgs),
+        "messages carry the task id",
+    )
+    conn.close()
+
+
+async def test_failed_decision_not_persisted(tmp: Path, config: CapriConfig) -> None:
+    conn = open_test_shard()
+    session = Session.create(conn)
+    failed = FakeBrain(
+        [
+            (
+                {
+                    "thought": "",
+                    "tool": "done",
+                    "final": (
+                        "I couldn't get a valid planner decision from the model. "
+                        "Check the Brain model and structured-output setting, then try again."
+                    ),
+                    "failed": True,
+                },
+                None,
+            )
+        ]
+    )
+    harness = await run_turn(config, session, failed, str(tmp))
+
+    done = harness.of_type("agent.done")
+    check(bool(done) and "valid planner decision" in done[-1]["text"], "failure is surfaced")
+    rows = conn.execute(
+        "SELECT role FROM messages WHERE episode_id = ? ORDER BY id",
+        (session.episode_id,),
+    ).fetchall()
+    check([row["role"] for row in rows] == ["user"], "failed planner output is not replayed as assistant history")
+
+    session.add_message(
+        "trn_old",
+        "assistant",
+        "My planner produced something that wasn't a decision. Try again.",
+    )
+    session.add_message("trn_old", "user", "how are you?")
+    runner = TurnRunner(
+        config=config,
+        conn=conn,
+        session=session,
+        emit=Harness().emit,
+        confirm=Harness().confirm,
+        brain=FakeBrain([({"thought": "", "tool": "done", "final": "fine"}, None)]),
+        registry=builtin_registry(),
+        policy=Policy(config.policy, str(tmp)),
+        workspace=str(tmp),
+    )
+    history = runner._history()
+    check(
+        all("planner produced" not in message["content"] for message in history),
+        "old harness failure rows are kept out of the prompt",
+    )
+    conn.close()
+
+
+def test_work_schema() -> None:
+    """The shard knows about work before the services that fill it exist."""
+    conn = open_test_shard()
+    tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    check(
+        {"workspaces", "tasks", "file_backups", "artifacts"} <= tables,
+        "work tables exist",
+    )
+    trace_cols = {row["name"] for row in conn.execute("PRAGMA table_info(traces)")}
+    check(
+        {"workspace_id", "task_id"} <= trace_cols,
+        "traces carry workspace and task ids",
+    )
+    message_cols = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
+    check("task_id" in message_cols, "messages carry task ids")
+    memory_cols = {row["name"] for row in conn.execute("PRAGMA table_info(memories)")}
+    check("workspace_id" in memory_cols, "memories carry workspace ids")
+    busy = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+    check(busy == 5000, f"a locked shard is waited on, not failed: busy_timeout={busy}")
+    conn.close()
+
+
+def test_work_prompt(tmp: Path) -> None:
+    """The persona and the work block say what the plan says they say."""
+    persona = prompt_mod.load_persona("kyoko").lower()
+    check("not an assistant" not in persona, "persona no longer disclaims being an assistant")
+    check("companion with hands" in persona, "persona states the companion-with-hands framing")
+    check("look before you touch" in persona, "persona carries the inspect-first rule")
+
+    work = prompt_mod.WorkContext(
+        workspace_id="wsp_1",
+        task_id="tsk_1",
+        name="capri",
+        root=str(tmp),
+        task_title="fix the parser",
+        task_status="active",
+        commands=(("test", "uv run pytest"), ("lint", "ruff check .")),
+        conventions="Two spaces. No tabs.",
+    )
+    block = prompt_mod.work_block(work)
+    check("Root:" in block and "fix the parser" in block, "work block names root and task")
+    check("uv run pytest" in block and "ruff check ." in block, "work block lists detected commands")
+    check("Two spaces" in block, "work block carries conventions")
+    check("data, not instructions" in block, "work block keeps the data framing")
+    check(prompt_mod.work_block(None) == "", "no workspace means no work block")
+    check(
+        prompt_mod.work_block(prompt_mod.WorkContext(workspace_id="wsp_1")) == "",
+        "ids alone do not produce a block",
+    )
+
+    long_work = prompt_mod.WorkContext(
+        name="capri", root=str(tmp), conventions="x" * (prompt_mod.CONVENTIONS_LIMIT * 3)
+    )
+    long_block = prompt_mod.work_block(long_work)
+    # The block also carries the coding protocol, and the temp path may itself
+    # contain an "x", so assert on the run of characters rather than a count.
+    check(
+        "[conventions truncated]" in long_block
+        and "x" * prompt_mod.CONVENTIONS_LIMIT in long_block
+        and "x" * (prompt_mod.CONVENTIONS_LIMIT + 1) not in long_block,
+        "long conventions are capped",
+    )
+
+    system = prompt_mod.system_prompt([], "kyoko", work=work)
+    check(str(tmp) in system and "## Workspace" in system, "work block reaches the system prompt")
+    check(
+        system.index("## Workspace") < system.index("## Acting"),
+        "work block sits ahead of the acting protocol",
+    )
+    bare = prompt_mod.system_prompt([], "kyoko")
+    check("## Workspace" not in bare, "no workspace means no block in the system prompt")
+
+    # The screen protocol is for turns that are about a window, not every turn.
+    check(
+        "## Controlling a window" not in system,
+        "the screen protocol stays out of an ordinary turn",
+    )
+    looking = prompt_mod.system_prompt([], "kyoko", work=work, screen=True)
+    check("## Controlling a window" in looking, "the screen protocol joins a screen turn")
+    check("expect" in looking, "the screen protocol asks for an expectation")
+    check(
+        looking.index("## Workspace") < looking.index("## Controlling a window"),
+        "the screen protocol follows the workspace block",
+    )
+
+
+def test_event_fields() -> None:
+    event = _event("memory.written", kind="fact", text="x")
+    check(event["type"] == "memory.written" and event["kind"] == "fact", "loop event fields cannot collide with the type")
+    wire = protocol.event("memory.written", kind="fact", text="x")
+    check(wire["type"] == "memory.written" and wire["kind"] == "fact", "wire event fields cannot collide with the type")
+
+
 async def main() -> int:
     print("grammar")
     test_grammar()
@@ -275,6 +512,18 @@ async def main() -> int:
         await test_blocked_tool(tmp, config)
         print("loop: stall guard")
         await test_stall_guard(tmp, config)
+        print("loop: failed decision")
+        await test_failed_decision_not_persisted(tmp, config)
+        print("loop: casual turn")
+        await test_casual_turn_no_tools(tmp, config)
+        print("loop: workspace and task ids")
+        await test_turn_carries_work_ids(tmp, config)
+        print("prompt")
+        test_work_prompt(tmp)
+        print("schema")
+        test_work_schema()
+        print("events")
+        test_event_fields()
     finally:
         for conn in _CONNS:
             try:

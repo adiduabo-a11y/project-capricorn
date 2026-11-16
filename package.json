@@ -2,7 +2,7 @@
   "name": "capri",
   "version": "0.0.0",
   "private": true,
-  "description": "Capri — local-first agent harness with memory, RAG, tools and desktop control",
+  "description": "Project Capricorn — local-first agent harness with memory, RAG, tools and desktop control",
   "workspaces": [
     "apps/*"
   ],

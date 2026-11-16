@@ -1,0 +1,45 @@
+{
+  "id": "append-and-verify",
+  "description": "Append to an existing log with fs.patch (confirmed) and read it back.",
+  "prompt": "Append a line to log.txt, then verify the file contents.",
+  "fixtures": {
+    "log.txt": "start\n"
+  },
+  "script": [
+    {
+      "thought": "Read the log before editing it.",
+      "tool": "fs.read",
+      "args": { "path": "log.txt" }
+    },
+    {
+      "thought": "Append the new line.",
+      "tool": "fs.patch",
+      "args": {
+        "path": "log.txt",
+        "edits": [{ "old": "start\n", "new": "start\nmore\n" }]
+      }
+    },
+    {
+      "thought": "Verify it landed.",
+      "tool": "fs.read",
+      "args": { "path": "log.txt" }
+    },
+    {
+      "thought": "Done.",
+      "tool": "done",
+      "final": "log.txt now contains start and more."
+    }
+  ],
+  "expect": {
+    "tools": [
+      { "name": "fs.read", "ok": true },
+      { "name": "fs.patch", "ok": true },
+      { "name": "fs.read", "ok": true }
+    ],
+    "finalContains": ["log.txt"],
+    "files": {
+      "log.txt": "start\nmore\n"
+    },
+    "confirms": 1
+  }
+}

@@ -17,7 +17,7 @@ const server = await createServer({ configFile: path.join(appDir, 'vite.config.t
 await server.listen()
 
 const url = server.resolvedUrls?.local?.[0] ?? 'http://localhost:5273'
-console.log(`\n  capri dev\n  renderer  ${url}\n  core      ws://127.0.0.1:8787\n`)
+console.log(`\n  project capricorn dev\n  renderer  ${url}\n  core      ws://127.0.0.1:8787\n`)
 
 const child = spawn(electronPath, ['.'], {
   cwd: appDir,

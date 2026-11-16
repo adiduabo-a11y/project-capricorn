@@ -1,34 +1,69 @@
-"""Filesystem tools: read, list, write.
+"""Filesystem tools: read, list, grep, write.
 
-These do not enforce policy themselves — the loop checks every call before it
+These do not enforce policy themselves â€” the loop checks every call before it
 is dispatched. What they *do* enforce is bounds: size caps so a stray read of a
-2 GB log cannot eat the context window.
+2 GB log cannot eat the context window, and a line range so the model can ask
+for the part of a file it actually needs.
+
+``fs.read`` returns line numbers and a content hash. The hash is what makes an
+exact-match patch safe: if the file changed since it was read, the patch is
+refused instead of applied to stale offsets.
 """
 
 from __future__ import annotations
 
+import asyncio
+import fnmatch
+import hashlib
 import os
+import re
 import time
 from pathlib import Path
 
+from ...workspace.tree import (
+    EXCLUDED_DIRS,
+    gitignore_rules as _gitignore_rules,
+    is_ignored as _ignored,
+    is_link as _is_link,
+)
 from ..base import ToolContext, ToolResult, ToolSpec, elapsed_ms
 from ..policy import resolve_path
 
-elapsed_ms_to_now = time.monotonic
-
 MAX_READ_BYTES = 400_000
+MAX_READ_LINES = 400
+MAX_RANGE_LINES = 2000
 MAX_WRITE_BYTES = 2_000_000
 MAX_LIST_ENTRIES = 500
+MAX_GREP_FILES = 5000
+MAX_GREP_FILE_BYTES = 1_000_000
+MAX_GREP_LINE = 300
+HASH_CHUNK = 1 << 20
 
 READ_SPEC = ToolSpec(
     name="fs.read",
-    description="Read a UTF-8 text file and return its contents.",
+    description=(
+        "Read a UTF-8 text file by line range. Returns numbered lines, the total "
+        "line count and a sha256 of the whole file."
+    ),
     tier=0,
+    max_calls_per_turn=24,
+    observation="file",
     params={
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "File path, absolute or workspace-relative."},
-            "max_bytes": {"type": "integer", "description": "Truncate after this many bytes."},
+            "start_line": {
+                "type": "integer",
+                "description": "First line to return, 1-based. Default 1.",
+            },
+            "end_line": {
+                "type": "integer",
+                "description": "Last line to return, inclusive. Default start_line + 399.",
+            },
+            "max_bytes": {
+                "type": "integer",
+                "description": "Stop decoding after this many bytes of the file.",
+            },
         },
         "required": ["path"],
         "additionalProperties": False,
@@ -39,6 +74,8 @@ LIST_SPEC = ToolSpec(
     name="fs.list",
     description="List a directory: names, sizes and whether each entry is a directory.",
     tier=0,
+    max_calls_per_turn=16,
+    observation="tree",
     params={
         "type": "object",
         "properties": {
@@ -49,20 +86,51 @@ LIST_SPEC = ToolSpec(
     },
 )
 
+GREP_SPEC = ToolSpec(
+    name="fs.grep",
+    description=(
+        "Search text files for a regular expression. Returns path:line: text for "
+        "each match, so a symbol can be found without guessing filenames."
+    ),
+    tier=0,
+    max_calls_per_turn=16,
+    observation="grep",
+    params={
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "description": "Regular expression to search for."},
+            "path": {
+                "type": "string",
+                "description": "Directory or file to search. Defaults to the workspace root.",
+            },
+            "include": {
+                "type": "string",
+                "description": "Glob filter on the filename or relative path, e.g. *.py.",
+            },
+            "case_sensitive": {"type": "boolean", "description": "Default false."},
+            "max_matches": {
+                "type": "integer",
+                "description": "Stop after this many matches. Default 80, max 500.",
+            },
+        },
+        "required": ["pattern"],
+        "additionalProperties": False,
+    },
+)
+
 WRITE_SPEC = ToolSpec(
     name="fs.write",
-    description="Write text to a file, creating parent directories.",
+    mutates=True,
+    description=(
+        "Create a new text file, creating parent directories. An existing path is "
+        "refused: use fs.patch to change a file that is already there."
+    ),
     tier=2,
     params={
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "File path, absolute or workspace-relative."},
             "content": {"type": "string", "description": "Full text to write."},
-            "mode": {
-                "type": "string",
-                "enum": ["overwrite", "append"],
-                "description": "overwrite replaces the file; append adds to it.",
-            },
         },
         "required": ["path", "content"],
         "additionalProperties": False,
@@ -77,10 +145,31 @@ def _display(path: str, workspace: str) -> str:
         return path
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(HASH_CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _decode(raw: bytes) -> tuple[str, str]:
+    """UTF-8, BOM tolerated. Bad bytes come back flagged, not silently fixed."""
+    try:
+        return raw.decode("utf-8-sig"), "utf-8"
+    except UnicodeDecodeError:
+        return raw.decode("utf-8", errors="replace"), "unknown"
+
+
 async def fs_read(
-    ctx: ToolContext, *, path: str, max_bytes: int = MAX_READ_BYTES
+    ctx: ToolContext,
+    *,
+    path: str,
+    start_line: int = 1,
+    end_line: int = 0,
+    max_bytes: int = MAX_READ_BYTES,
 ) -> ToolResult:
-    started = elapsed_ms_to_now()
+    started = time.monotonic()
     target = resolve_path(path, ctx.workspace)
     file = Path(target)
 
@@ -91,27 +180,73 @@ async def fs_read(
             f"fs.read: {_display(target, ctx.workspace)} is a directory; use fs.list"
         )
 
-    cap = min(max(1, int(max_bytes)), MAX_READ_BYTES)
+    cap = min(max(1, int(max_bytes or MAX_READ_BYTES)), MAX_READ_BYTES)
     try:
-        raw = file.read_bytes()
+        size = file.stat().st_size
+        with file.open("rb") as handle:
+            raw = handle.read(cap)
+        digest = await asyncio.to_thread(_sha256, file)
     except OSError as exc:
         return ToolResult.error(f"fs.read: {exc}")
 
-    truncated = len(raw) > cap
-    text = raw[:cap].decode("utf-8", errors="replace")
-    if truncated:
-        text += f"\n\n[truncated at {cap} of {len(raw)} bytes]"
+    text, encoding = _decode(raw)
+    lines = text.splitlines()
+    total_lines = len(lines) if len(raw) >= size else None
+
+    first = max(1, int(start_line or 1))
+    last = int(end_line or 0)
+    if last <= 0:
+        last = first + MAX_READ_LINES - 1
+    last = max(first, min(last, first + MAX_RANGE_LINES - 1))
+    if total_lines is not None:
+        last = min(last, total_lines)
+
+    if total_lines is not None and total_lines > 0 and first > total_lines:
+        return ToolResult.error(
+            f"fs.read: start_line {first} is past the end of {total_lines}-line file"
+        )
+
+    body_lines = [
+        f"{number:5d}: {lines[number - 1]}" for number in range(first, min(last, len(lines)) + 1)
+    ]
+    body = "\n".join(body_lines) or "(empty file)"
+    notes: list[str] = []
+    if total_lines is None:
+        notes.append(f"[file continues past {len(raw)} bytes; line count unknown]")
+        notes.append(f"[lines {first}-{last}; continue with start_line={last + 1}]")
+    elif last < total_lines:
+        notes.append(
+            f"[lines {first}-{last} of {total_lines}; continue with start_line={last + 1}]"
+        )
+    if notes:
+        body = "\n".join([body, *notes])
+    if encoding != "utf-8":
+        # First line, not last: shaping keeps the head of a long read.
+        body = "[not valid UTF-8 - fs.patch will refuse this file]\n" + body
+
+    # The hash the patch tool checks against is the whole file's, even for a
+    # ranged read: a stale patch is stale regardless of which lines were seen.
+    if ctx.reads is not None:
+        ctx.reads[target] = digest
 
     return ToolResult(
         ok=True,
-        output=text,
-        data={"path": target, "bytes": len(raw), "truncated": truncated},
+        output=body,
+        data={
+            "path": target,
+            "bytes": size,
+            "sha256": digest,
+            "total_lines": total_lines,
+            "start_line": first,
+            "end_line": last,
+            "encoding": encoding,
+        },
         ms=elapsed_ms(started),
     )
 
 
 async def fs_list(ctx: ToolContext, *, path: str) -> ToolResult:
-    started = elapsed_ms_to_now()
+    started = time.monotonic()
     target = resolve_path(path, ctx.workspace)
     directory = Path(target)
 
@@ -135,7 +270,7 @@ async def fs_list(ctx: ToolContext, *, path: str) -> ToolResult:
         except OSError:
             lines.append(f"{entry.name}  ?")
     if len(entries) > MAX_LIST_ENTRIES:
-        lines.append(f"… {len(entries) - MAX_LIST_ENTRIES} more entries")
+        lines.append(f"â€¦ {len(entries) - MAX_LIST_ENTRIES} more entries")
 
     return ToolResult(
         ok=True,
@@ -145,10 +280,124 @@ async def fs_list(ctx: ToolContext, *, path: str) -> ToolResult:
     )
 
 
-async def fs_write(
-    ctx: ToolContext, *, path: str, content: str, mode: str = "overwrite"
+# --------------------------------------------------------------------------- grep
+
+
+def _walk_files(root: Path, include: str) -> list[Path]:
+    rules = _gitignore_rules(root)
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        current = Path(dirpath)
+        keep: list[str] = []
+        for name in dirnames:
+            full = current / name
+            if name in EXCLUDED_DIRS or _is_link(full):
+                continue
+            if _ignored(os.path.relpath(full, root), name, rules):
+                continue
+            keep.append(name)
+        dirnames[:] = keep
+
+        for name in filenames:
+            full = current / name
+            if _is_link(full):
+                continue
+            rel = os.path.relpath(full, root)
+            if _ignored(rel, name, rules):
+                continue
+            if include and not (
+                fnmatch.fnmatch(name, include) or fnmatch.fnmatch(rel.replace("\\", "/"), include)
+            ):
+                continue
+            found.append(full)
+            if len(found) >= MAX_GREP_FILES:
+                return found
+    return found
+
+
+async def fs_grep(
+    ctx: ToolContext,
+    *,
+    pattern: str,
+    path: str = "",
+    include: str = "",
+    case_sensitive: bool = False,
+    max_matches: int = 80,
 ) -> ToolResult:
-    started = elapsed_ms_to_now()
+    started = time.monotonic()
+    try:
+        flags = 0 if case_sensitive else re.IGNORECASE
+        expression = re.compile(str(pattern), flags)
+    except re.error as exc:
+        return ToolResult.error(f"fs.grep: bad pattern: {exc}")
+
+    target = Path(resolve_path(str(path or ctx.workspace), ctx.workspace))
+    if not target.exists():
+        return ToolResult.error(f"fs.grep: no such path: {_display(str(target), ctx.workspace)}")
+
+    root = target if target.is_dir() else target.parent
+    limit = max(1, min(int(max_matches or 80), 500))
+    files = [target] if target.is_file() else _walk_files(root, include)
+
+    matches: list[str] = []
+    scanned = 0
+    capped = False
+    for file in files:
+        if capped:
+            break
+        try:
+            if file.stat().st_size > MAX_GREP_FILE_BYTES:
+                continue
+            raw = file.read_bytes()
+        except OSError:
+            continue
+        if b"\x00" in raw[:8192]:
+            continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            # The plan says text files only. A replacement-decoded binary is a
+            # source of confident nonsense.
+            continue
+        scanned += 1
+        display = _display(str(file), ctx.workspace)
+        for number, line in enumerate(text.splitlines(), 1):
+            if not expression.search(line):
+                continue
+            matches.append(f"{display}:{number}: {line.strip()[:MAX_GREP_LINE]}")
+            if len(matches) >= limit:
+                capped = True
+                break
+
+    if not matches:
+        return ToolResult(
+            ok=True,
+            output=f"(no matches in {scanned} files)",
+            data={"matches": 0, "files": scanned},
+            ms=elapsed_ms(started),
+        )
+
+    summary = (
+        f"[showing first {limit} matches in {scanned} files; narrow the pattern]"
+        if capped
+        else f"[{len(matches)} matches in {scanned} files]"
+    )
+    return ToolResult(
+        ok=True,
+        output="\n".join([*matches, summary]),
+        data={"matches": len(matches), "files": scanned, "capped": capped},
+        ms=elapsed_ms(started),
+    )
+
+
+async def fs_write(ctx: ToolContext, *, path: str, content: str) -> ToolResult:
+    """Create a new file.
+
+    Overwriting is refused on purpose: a full-file write silently rewrites line
+    endings, a BOM and anything else the model never saw. Existing files go
+    through ``fs.patch``, which preserves all of that and leaves an undo record.
+    """
+    started = time.monotonic()
     target = resolve_path(path, ctx.workspace)
     data = str(content)
 
@@ -156,23 +405,35 @@ async def fs_write(
         return ToolResult.error(f"fs.write: content exceeds {MAX_WRITE_BYTES} bytes")
 
     file = Path(target)
-    if mode not in ("overwrite", "append"):
-        return ToolResult.error(f"fs.write: mode must be overwrite or append, got {mode!r}")
+    if file.exists():
+        if file.is_dir():
+            return ToolResult.error(
+                f"fs.write: {_display(target, ctx.workspace)} is a directory"
+            )
+        return ToolResult.error(
+            f"fs.write: {_display(target, ctx.workspace)} already exists. "
+            "Use fs.patch to edit it; fs.write only creates new files."
+        )
 
     try:
         file.parent.mkdir(parents=True, exist_ok=True)
-        if mode == "append":
-            with file.open("a", encoding="utf-8", newline="") as handle:
-                handle.write(data)
-        else:
-            file.write_text(data, encoding="utf-8", newline="")
+        file.write_text(data, encoding="utf-8", newline="")
     except OSError as exc:
         return ToolResult.error(f"fs.write: {exc}")
 
+    digest = await asyncio.to_thread(_sha256, file)
+    if ctx.reads is not None:
+        ctx.reads[target] = digest
+
     return ToolResult(
         ok=True,
-        output=f"wrote {len(data.encode('utf-8'))} bytes to {_display(target, ctx.workspace)}"
-        f" ({mode})",
-        data={"path": target, "bytes": len(data.encode("utf-8")), "mode": mode},
+        output=f"created {_display(target, ctx.workspace)}"
+        f" ({len(data.encode('utf-8'))} bytes)",
+        data={
+            "path": target,
+            "bytes": len(data.encode("utf-8")),
+            "sha256": digest,
+            "created": True,
+        },
         ms=elapsed_ms(started),
     )

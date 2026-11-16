@@ -27,8 +27,8 @@ ERROR_CODES = {
 }
 
 
-def event(kind: str, **fields: Any) -> dict[str, Any]:
-    return {"type": kind, **fields}
+def event(event_type: str, **fields: Any) -> dict[str, Any]:
+    return {"type": event_type, **fields}
 
 
 def ok(request_id: str | None, result: Any = None) -> dict[str, Any]:

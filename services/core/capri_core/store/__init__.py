@@ -9,12 +9,13 @@ from .db import (
     set_meta,
     trace,
 )
-from .vector import DIM, backend_of, ensure_vector_tables, search, upsert
+from .vector import DEFAULT_DIM, backend_of, dimension_of, ensure_vector_tables, search, upsert
 
 __all__ = [
-    "DIM",
+    "DEFAULT_DIM",
     "backend_of",
     "connect",
+    "dimension_of",
     "ensure_vector_tables",
     "get_meta",
     "migrate",

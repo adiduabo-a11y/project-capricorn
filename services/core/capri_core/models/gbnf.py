@@ -20,7 +20,7 @@ _HEADER = r"""ws ::= [ \t\n\r]*
 integer ::= "-"? [0-9]+
 number ::= "-"? [0-9]+ ("." [0-9]+)?
 boolean ::= "true" | "false"
-string ::= "\"" [^"\\]* "\""
+string ::= "\"" ( [^"\\] | "\\" . )* "\""
 value ::= object | array | string | number | boolean | "null"
 object ::= "{" ws (pair (ws "," ws pair)*)? ws "}"
 pair ::= string ws ":" ws value
@@ -147,6 +147,6 @@ def decision(tools: list[str]) -> str:
         f'{_lit("\"tool\"")} ws ":" ws tool ws "," ws '
         f'{_lit("\"final\"")} ws ":" ws str ws "}}"\n'
         f"tool ::= {tool_alts}\n"
-        'str ::= "\\"" [^"\\\\]* "\\""\n'
+        'str ::= "\\"" ( [^"\\\\] | "\\\\" . )* "\\""\n'
         "ws ::= [ \\t\\n\\r]*\n"
     )
