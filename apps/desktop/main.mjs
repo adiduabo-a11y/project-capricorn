@@ -1640,6 +1640,112 @@ function configureAudioPermissions() {
   })
 }
 
+// --------------------------------------------------------------------------- updates
+
+/**
+ * In-place updates from GitHub Releases.
+ *
+ * The packaged app reads `resources/app-update.yml` (written at build time from
+ * the `publish` block in electron-builder.yml), asks GitHub for the newest
+ * release, downloads the installer that `latest.yml` describes and runs it
+ * silently in place. A dev run, a smoke run or an unpacked build never touches
+ * this: there is no installed app to replace and no feed to read.
+ */
+const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000
+
+let updateState = {
+  status: 'idle',
+  version: app.getVersion(),
+  progress: 0,
+  error: '',
+}
+let updateTimer = null
+let autoUpdate = null
+
+function publishUpdate(patch) {
+  updateState = { ...updateState, ...patch }
+  if (win && !win.isDestroyed()) win.webContents.send('capri:update', updateState)
+}
+
+function updatesSupported() {
+  if (!app.isPackaged || isSmoke) return false
+  return existsSync(path.join(process.resourcesPath, 'app-update.yml'))
+}
+
+async function loadUpdater() {
+  if (autoUpdate) return autoUpdate
+  // Loaded lazily: constructing the updater needs a ready electron app, and a
+  // dev run should never pay for it.
+  const mod = await import('electron-updater')
+  autoUpdate = (mod.default ?? mod).autoUpdater ?? mod.autoUpdater
+  return autoUpdate
+}
+
+function checkForUpdates() {
+  return loadUpdater()
+    .then((updater) => updater.checkForUpdates())
+    .catch((err) => {
+      publishUpdate({ status: 'error', error: String(err?.message || err).slice(0, 300) })
+    })
+}
+
+async function setupUpdates() {
+  if (!updatesSupported()) {
+    updateState = { ...updateState, status: 'unsupported' }
+    return
+  }
+  const updater = await loadUpdater()
+  updater.autoDownload = true
+  // Downloaded and quiet: the installer runs when she quits, or immediately if
+  // the person asks for the restart.
+  updater.autoInstallOnAppQuit = true
+  updater.allowDowngrade = false
+  updater.logger = { info() {}, warn() {}, error() {}, debug() {} }
+  updater.on('checking-for-update', () => publishUpdate({ status: 'checking', progress: 0, error: '' }))
+  updater.on('update-available', (info) =>
+    publishUpdate({ status: 'available', version: String(info?.version || ''), progress: 0 }),
+  )
+  updater.on('update-not-available', () =>
+    publishUpdate({ status: 'current', version: app.getVersion(), progress: 0 }),
+  )
+  updater.on('download-progress', (progress) =>
+    publishUpdate({
+      status: 'downloading',
+      progress: Math.max(0, Math.min(100, Number(progress?.percent) || 0)),
+    }),
+  )
+  updater.on('update-downloaded', (info) =>
+    publishUpdate({ status: 'ready', version: String(info?.version || ''), progress: 100 }),
+  )
+  updater.on('error', (err) =>
+    publishUpdate({ status: 'error', error: String(err?.message || err).slice(0, 300) }),
+  )
+
+  console.log(`[update] checking for a newer release (on ${app.getVersion()})`)
+  void checkForUpdates()
+  updateTimer = setInterval(() => void checkForUpdates(), UPDATE_INTERVAL_MS)
+  updateTimer.unref?.()
+}
+
+ipcMain.handle('capri:update-state', () => updateState)
+
+ipcMain.handle('capri:update-check', async () => {
+  if (!updatesSupported()) return updateState
+  if (updateState.status === 'downloading' || updateState.status === 'ready') return updateState
+  publishUpdate({ status: 'checking', error: '' })
+  await checkForUpdates()
+  return updateState
+})
+
+ipcMain.handle('capri:update-install', async () => {
+  if (updateState.status !== 'ready') throw new Error('no update is ready to install')
+  const updater = await loadUpdater()
+  // Silent, then relaunch: an assisted installer would otherwise sit waiting
+  // for clicks while the window it belongs to is closing.
+  setImmediate(() => updater.quitAndInstall(true, true))
+  return updateState
+})
+
 app.whenReady().then(() => {
   registerAppProtocol()
   configureAudioPermissions()
@@ -1662,6 +1768,10 @@ app.whenReady().then(() => {
     else showPanel()
     if (!petWin || petWin.isDestroyed()) createPetWindow()
   })
+
+  // Not during startup: the first turn and the sidecar come first, and an
+  // update check should never be why the window is slow to appear.
+  setTimeout(() => void setupUpdates(), 15_000)
 })
 
 app.on('window-all-closed', () => {

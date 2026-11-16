@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { SettingsPanel } from './SettingsPanel'
+import { UpdateChip } from './UpdateChip'
 import { BargeMonitor } from './audio/barge'
 import { AudioEngine } from './audio/engine'
 import { useInputDevice } from './audio/useInputDevice'
@@ -1619,6 +1620,7 @@ export default function App() {
             <span className="eyes-dot wake-dot" data-armed={wakeArmed} aria-hidden />
             {wakeArmed ? 'wake on' : 'wake off'}
           </button>
+          <UpdateChip />
           {floorOpen ? (
             <button
               className="eyes floor"

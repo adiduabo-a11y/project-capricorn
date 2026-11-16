@@ -28,6 +28,13 @@ win:
       arch:
         - x64
   artifactName: Project-Capricorn-Setup-${version}.${ext}
+# Where the packaged app looks for a newer build. electron-builder writes
+# resources/app-update.yml from this and a latest.yml beside the installer, so
+# the app can read the feed, download the asset and run it in place.
+publish:
+  provider: github
+  owner: adiduabo-a11y
+  repo: project-capricorn
 nsis:
   oneClick: false
   perMachine: false

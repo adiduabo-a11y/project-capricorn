@@ -78,7 +78,7 @@ requires-dist = [{ name = "capri-core", editable = "services/core" }]
 
 [[package]]
 name = "capri-core"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "services/core" }
 dependencies = [
     { name = "httpx" },

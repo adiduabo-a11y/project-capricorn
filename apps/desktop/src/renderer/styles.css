@@ -2961,3 +2961,40 @@ textarea::-webkit-scrollbar {
   text-decoration: underline;
   cursor: pointer;
 }
+
+/* Update chip: the one place the shell admits a newer build exists. */
+.eyes.update {
+  border-color: var(--well-edge);
+  color: var(--faint);
+  cursor: default;
+}
+
+.eyes.update[data-state='downloading'],
+.eyes.update[data-state='checking'] {
+  opacity: 0.8;
+}
+
+.eyes.update.ready {
+  cursor: pointer;
+  color: var(--cyan);
+  border-color: var(--cyan);
+}
+
+.eyes.update.ready:hover {
+  background: rgba(24, 240, 232, 0.12);
+}
+
+.eyes.update.failed {
+  cursor: pointer;
+  color: #d98a80;
+  border-color: #b4544a;
+}
+
+.eyes.update.current {
+  cursor: pointer;
+  opacity: 0.55;
+}
+
+.update-dot {
+  background: currentColor;
+}

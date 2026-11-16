@@ -421,6 +421,34 @@ export interface CapriBridge {
   setMouth(viseme: string | null): void
   /** Panel surface: move her because of the request or the screen. */
   petCue(cue: PetCue): void
+  /** In-place updates: the shell owns the download, the panel only shows it. */
+  updateState(): Promise<UpdateState>
+  checkForUpdates(): Promise<UpdateState>
+  installUpdate(): Promise<UpdateState>
+  onUpdate(handler: (state: UpdateState) => void): () => void
+}
+
+/**
+ * Where the update stands.
+ *
+ * `unsupported` is a dev or unpacked run: there is no installed app to replace.
+ * `current` means the feed answered and had nothing newer.
+ */
+export type UpdateStatus =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'ready'
+  | 'current'
+  | 'error'
+  | 'unsupported'
+
+export interface UpdateState {
+  status: UpdateStatus
+  version: string
+  progress: number
+  error: string
 }
 
 declare global {

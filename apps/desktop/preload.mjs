@@ -139,6 +139,24 @@ const api = {
   ready() {
     ipcRenderer.send('capri:renderer-ready')
   },
+
+  updateState() {
+    return ipcRenderer.invoke('capri:update-state')
+  },
+
+  checkForUpdates() {
+    return ipcRenderer.invoke('capri:update-check')
+  },
+
+  installUpdate() {
+    return ipcRenderer.invoke('capri:update-install')
+  },
+
+  onUpdate(handler) {
+    const listener = (_event, state) => handler(state || {})
+    ipcRenderer.on('capri:update', listener)
+    return () => ipcRenderer.off('capri:update', listener)
+  },
 }
 
 contextBridge.exposeInMainWorld('capri', api)
