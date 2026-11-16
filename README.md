@@ -16,7 +16,15 @@ and not to reach for a tool, and `packs/prompts/kyoko/system.md` says the same
 in every turn. Work shaped under a request — "ok, now add a footer" — is
 unaffected.
 
-**Full design:** [`.opencode/plan/capri-spec.md`](C:/Users/daeme/.opencode/plan/capri-spec.md)
+---
+
+## Install
+
+Download the latest `Project-Capricorn-Setup-<version>.exe` from
+[Releases](https://github.com/adiduabo-a11y/project-capricorn/releases) and run
+it. Windows x64. The installer is unsigned, so Windows SmartScreen will ask you
+to confirm — "More info" → "Run anyway". Python, the sidecar and the required
+runtime extras are bundled; there is nothing else to install.
 
 ---
 
