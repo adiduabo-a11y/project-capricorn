@@ -39,7 +39,7 @@ from ..config import (
     schema,
     set_value,
 )
-from ..mcp import McpService
+from ..mcp import McpService, importing
 from ..memory import MemoryService
 from ..models import Router
 from ..rag import RagService
@@ -203,6 +203,7 @@ class CapriServer:
             "config.schema": self._config_schema,
             "mcp.servers": self._mcp_servers,
             "mcp.save": self._mcp_save,
+            "mcp.import": self._mcp_import,
             "mcp.remove": self._mcp_remove,
             "mcp.reload": self._mcp_reload,
             "trace.get": self._trace_get,
@@ -593,6 +594,52 @@ class CapriServer:
         await self._apply_mcp(data, f"mcp.remove:{name}")
         return {
             "ok": True,
+            "enabled": bool(self.config.mcp.enabled),
+            "servers": self.mcp.status(),
+        }
+
+    async def _mcp_import(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
+        """Add every server in a pasted Claude-Desktop config.
+
+        One write and one restart for the whole paste: four servers used to be
+        four restarts, and a config half-applied by a failure in the third is
+        worse than a refused one.
+        """
+        text = params.get("config")
+        if not isinstance(text, str):
+            raise RpcError("invalid_args", "config must be the pasted text")
+        try:
+            parsed = importing.parse_config(text)
+        except importing.ConfigError as exc:
+            # The position is already in the message: a paste box that says
+            # "line 4, column 9" is one you can fix without a JSON validator.
+            raise RpcError("invalid_args", str(exc)) from exc
+
+        rows = parsed["servers"]
+        imported: list[str] = []
+        if rows:
+            data = self.config.model_dump(mode="json")
+            servers = data.setdefault("mcp", {}).setdefault("servers", {})
+            for row in rows:
+                # env is written as pasted: an imported server's environment is
+                # the part the panel cannot show, so losing it here would leave
+                # a server that starts without its key and fails for no reason.
+                servers[row["name"]] = {
+                    "command": row["command"],
+                    "args": list(row["args"]),
+                    "env": dict(row["env"]),
+                    "cwd": row["cwd"],
+                    "enabled": bool(row["enabled"]),
+                    "tier": int(row["tier"]),
+                }
+                imported.append(row["name"])
+            await self._apply_mcp(data, f"mcp.import:{len(imported)}")
+
+        return {
+            "ok": bool(imported),
+            "imported": imported,
+            "skipped": parsed["skipped"],
+            "notes": parsed["notes"],
             "enabled": bool(self.config.mcp.enabled),
             "servers": self.mcp.status(),
         }

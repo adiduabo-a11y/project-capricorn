@@ -2962,6 +2962,57 @@ textarea::-webkit-scrollbar {
   cursor: pointer;
 }
 
+/* Import: a pasted Claude-Desktop config, and what came of it. */
+.mcp-import {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--edge);
+}
+
+.mcp-paste {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  min-height: 96px;
+  padding: 6px 8px;
+  resize: vertical;
+  color: inherit;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--edge);
+  white-space: pre;
+}
+
+.mcp-report {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mcp-import-line {
+  font-size: 11px;
+  padding: 2px 0 2px 7px;
+  border-left: 3px solid var(--edge);
+  word-break: break-word;
+}
+
+.mcp-import-line.ok {
+  color: var(--cyan);
+  border-left-color: var(--cyan);
+}
+
+.mcp-import-line.bad {
+  color: #d98a80;
+  border-left-color: #b4544a;
+}
+
+.mcp-note {
+  margin: 0;
+  font-size: 11px;
+  opacity: 0.65;
+}
+
 /* Update chip: the one place the shell admits a newer build exists. */
 .eyes.update {
   border-color: var(--well-edge);
