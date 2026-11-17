@@ -3033,6 +3033,59 @@ textarea::-webkit-scrollbar {
   word-break: break-word;
 }
 
+/* The environment a server is handed: shown as it is stored, edited in place. */
+.mcp-env {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mcp-env-line {
+  display: flex;
+  gap: 8px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  opacity: 0.6;
+  word-break: break-all;
+}
+
+.mcp-env-name {
+  flex: none;
+  color: var(--cyan);
+}
+
+/* A value behind a click: an env token should not sit on screen unasked. */
+.masked-value {
+  all: unset;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.mcp-env-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mcp-env-row input {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  padding: 2px 6px;
+  color: inherit;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--edge);
+}
+
+.mcp-env-row input.mcp-env-key {
+  width: 130px;
+}
+
+.mcp-env-row input.mcp-env-val {
+  flex: 1;
+  min-width: 120px;
+}
+
 .mcp-add {
   display: flex;
   flex-wrap: wrap;

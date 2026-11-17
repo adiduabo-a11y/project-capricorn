@@ -120,6 +120,13 @@ for line in sys.stdin:
                     "result": {"content": [{"type": "text", "text": "it broke"}], "isError": True},
                 }
             )
+        elif name == "crash":
+            # How a real server dies: the reason is on stderr, and the protocol
+            # simply stops. Not advertised in tools/list, so the fixture's tool
+            # pages stay what the other checks expect.
+            sys.stderr.write("fatal: the widget factory exploded\n")
+            sys.stderr.flush()
+            sys.exit(3)
         else:
             error(message_id, -32602, f"unknown tool {name}")
         continue

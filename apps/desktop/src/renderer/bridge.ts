@@ -31,6 +31,13 @@ export interface ConfirmRequest {
   notes?: string[]
 }
 
+/** What mcp.try answers: a draft server started once, and what it offered. */
+export interface ToolTry {
+  ok: boolean
+  tools: { name: string; description: string }[]
+  error: string
+}
+
 /** A remembered item, as the browser sees it. */
 export interface MemoryItem {
   id: number

@@ -39,7 +39,7 @@ from ..config import (
     schema,
     set_value,
 )
-from ..mcp import McpService, importing
+from ..mcp import McpService, importing, same_row
 from ..memory import MemoryService
 from ..models import Router
 from ..rag import RagService
@@ -243,6 +243,7 @@ class CapriServer:
             "config.schema": self._config_schema,
             "mcp.servers": self._mcp_servers,
             "mcp.save": self._mcp_save,
+            "mcp.try": self._mcp_try,
             "mcp.import": self._mcp_import,
             "mcp.remove": self._mcp_remove,
             "mcp.reload": self._mcp_reload,
@@ -596,7 +597,8 @@ class CapriServer:
         if not _MCP_NAME.fullmatch(name):
             raise RpcError("invalid_args", "a server name is 1-32 letters, digits, '-' or '_'")
         existing = self.config.mcp.servers.get(name)
-        base: dict[str, Any] = existing.model_dump(mode="json") if existing else {}
+        before = existing.model_dump(mode="json") if existing else None
+        base: dict[str, Any] = dict(before) if before else {}
         if params.get("command") is not None:
             base["command"] = str(params["command"]).strip()
         if params.get("args") is not None:
@@ -610,20 +612,73 @@ class CapriServer:
             base["tier"] = params["tier"]
         if params.get("enabled") is not None:
             base["enabled"] = bool(params["enabled"])
+        # The whole map replaces the stored one; the rule about names and
+        # values lives in importing, where the same one judges a paste.
+        try:
+            base["env"] = importing.merge_env(base.get("env") or {}, params.get("env"))
+        except importing.ConfigError as exc:
+            raise RpcError("invalid_args", str(exc)) from exc
         if not str(base.get("command") or "").strip():
             raise RpcError("invalid_args", "command is required")
         try:
             server = McpServerCfg.model_validate(base)
         except ValidationError as exc:
             raise RpcError("invalid_args", _validation_note(exc)) from exc
+        if same_row(before, server):
+            # Nothing to write and nothing to restart. The panel saves the whole
+            # row, so this is what re-clicking the current tier, or saving an
+            # untouched env map, costs: no file write and no cold start.
+            return {
+                "ok": True,
+                "changed": False,
+                "enabled": bool(self.config.mcp.enabled),
+                "servers": self.mcp.status(),
+            }
         data = self.config.model_dump(mode="json")
         data["mcp"]["servers"][name] = server.model_dump(mode="json")
-        await self._apply_mcp(data, f"mcp.save:{name}")
+        # Only this server: the rest are working and were not touched.
+        await self._apply_mcp(data, f"mcp.save:{name}", {name})
         return {
             "ok": True,
+            "changed": True,
             "enabled": bool(self.config.mcp.enabled),
             "servers": self.mcp.status(),
         }
+
+    async def _mcp_try(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
+        """Start a draft server once and report what it offers, saving nothing.
+
+        The panel's add row and the approval card both ask this before a row
+        exists. Nothing is written and nothing is registered, so a tier-3
+        server — saved switched off and never started — can still be checked.
+        """
+        command = str(params.get("command") or "").strip()
+        if not command:
+            raise RpcError("invalid_args", "command is required")
+        raw_args = params.get("args")
+        if raw_args is None:
+            raw_args = []
+        if not isinstance(raw_args, list) or not all(isinstance(arg, str) for arg in raw_args):
+            raise RpcError("invalid_args", "args must be a list of strings")
+        try:
+            env = importing.env_pairs(params.get("env") or {})
+        except importing.ConfigError as exc:
+            raise RpcError("invalid_args", str(exc)) from exc
+        name = str(params.get("name") or "").strip()
+        result = await self.mcp.probe(
+            command,
+            [str(arg) for arg in raw_args],
+            env=env,
+            cwd=str(params.get("cwd") or "").strip(),
+            name=name,
+        )
+        db.trace(
+            self.conn,
+            span="mcp",
+            name="mcp.try",
+            payload={"name": name or command, "ok": result["ok"], "tools": len(result["tools"])},
+        )
+        return result
 
     async def _mcp_remove(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
         name = str(params.get("name") or "").strip()
@@ -631,7 +686,7 @@ class CapriServer:
             raise RpcError("not_found", f"no MCP server named {name!r}")
         data = self.config.model_dump(mode="json")
         del data["mcp"]["servers"][name]
-        await self._apply_mcp(data, f"mcp.remove:{name}")
+        await self._apply_mcp(data, f"mcp.remove:{name}", {name})
         return {
             "ok": True,
             "enabled": bool(self.config.mcp.enabled),
@@ -710,7 +765,7 @@ class CapriServer:
             servers[name] = importing.row_config(row, tier=tier)
             chosen[name] = servers[name]["tier"]
         try:
-            await self._apply_mcp(data, f"mcp.register:{','.join(names)}")
+            await self._apply_mcp(data, f"mcp.register:{','.join(names)}", set(names))
         except RpcError as exc:
             return ToolResult.error(
                 f"nothing was registered: {exc.message or exc.code}"
@@ -779,7 +834,7 @@ class CapriServer:
                 # was allowed to have, never one it declared for itself.
                 servers[row["name"]] = importing.row_config(row, tier=row["tier"])
                 imported.append(row["name"])
-            await self._apply_mcp(data, f"mcp.import:{len(imported)}")
+            await self._apply_mcp(data, f"mcp.import:{len(imported)}", set(imported))
 
         return {
             "ok": bool(imported),
@@ -795,8 +850,14 @@ class CapriServer:
         db.trace(self.conn, span="mcp", name="mcp.reload", payload={"started": started})
         return {"ok": True, "started": started, "servers": self.mcp.status()}
 
-    async def _apply_mcp(self, data: dict[str, Any], span: str) -> None:
-        """Write an edited config and restart the servers against it."""
+    async def _apply_mcp(
+        self, data: dict[str, Any], span: str, restart: set[str] | None = None
+    ) -> None:
+        """Write an edited config and restart the servers it touched.
+
+        ``restart`` is the rows this edit changed; the servers it does not name
+        keep their processes and their tools. ``None`` restarts everything.
+        """
         try:
             updated = CapriConfig.model_validate(data)
         except ValidationError as exc:
@@ -807,7 +868,7 @@ class CapriServer:
             raise RpcError("internal", f"could not write config: {exc}") from exc
         self.config = updated
         self.mcp.config = updated
-        started = await self.mcp.reload()
+        started = await self.mcp.reload(restart)
         db.trace(self.conn, span="mcp", name=span, payload={"started": started})
 
     async def _trace_get(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:

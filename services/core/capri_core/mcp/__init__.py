@@ -10,7 +10,7 @@ the contract yet: a tool is the unit the loop can actually act on.
 """
 
 from .client import McpClient, McpError, flatten_result
-from .service import McpService, clean_schema, tool_name
+from .service import McpService, clean_schema, same_row, tool_name
 
 __all__ = [
     "McpClient",
@@ -18,5 +18,6 @@ __all__ = [
     "McpService",
     "clean_schema",
     "flatten_result",
+    "same_row",
     "tool_name",
 ]

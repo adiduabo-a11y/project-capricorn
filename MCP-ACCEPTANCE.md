@@ -228,10 +228,38 @@ tool. Note which letter, since that changes the diagnosis.
 
 ---
 
+## Environment variables
+
+`mcp.status()` returns each server's `env` as it is stored, and the row shows
+every `NAME` under the command. Each value is masked (`••••••`, the same length
+whatever the secret) and a click reveals it; the register card masks them the
+same way. `edit env` opens the row: add a variable, change a value, drop one,
+then `save env`. Editing shows the values as text, because that is the
+deliberate act of changing one. The add row's `env` link opens the same rows
+before the server exists, so one that needs a token is added in a step and
+starts on the first try.
+
+`mcp.save` takes the whole map as its `env` parameter: a dropped variable leaves
+the file, and a save that does not mention `env` leaves the stored one alone. A
+save restarts only the server it names, so editing one env does not cold-start
+the others, and a save that changes nothing writes nothing and restarts nothing.
+`try`, in the add row and on the register card, starts the command once, lists
+its tools and stops it again, writing nothing — the only way to check a server
+whose row would be tier 3. While MCP is switched off, `try` says so and no
+process starts.
+
+The values reach the server's process unchanged: an empty value stays an empty
+value, not a missing name. A name that is empty, contains `=`, or repeats
+another spelling of itself is refused with `invalid_args`. On Windows that
+includes two spellings that differ only in case (`TOKEN` and `token`): names are
+compared without case there, so the save is refused naming both rather than
+letting one silently win when the server starts.
+
 ## Known gaps, so they are not hunted for
 
-- `mcp.status()` still does not return `env`, so an imported server's
-  environment is visible on the card and in `config.yaml`, not in the settings
-  row.
-- `mcp.save` takes no `env` parameter, so env arrives by paste only — it cannot
-  be edited on an existing row.
+- `mcp.save` cannot rename a server: remove it and add it again under the new
+  name, which is also the only way to move it to a different tier quietly.
+- A server that dies after boot is reported as failed with the last lines it
+  printed on stderr, and its tools are withdrawn so nothing offers a call that
+  can only fail. Nothing restarts it on its own: `retry all`, or saving the row,
+  is what brings it back.

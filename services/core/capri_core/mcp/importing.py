@@ -13,6 +13,7 @@ whatever could not be honoured becomes a note.
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, Mapping
 
@@ -143,6 +144,59 @@ def row_config(row: Mapping[str, Any], *, tier: int) -> dict[str, Any]:
     }
 
 
+def env_pairs(raw: Any, *, windows: bool | None = None) -> dict[str, str]:
+    """An environment a config can hold, or ``ConfigError`` saying why it cannot.
+
+    Both doors land here — the panel's save and a pasted config — so a name is
+    judged once. Empty, carrying ``=``, or carrying a null byte are the three a
+    process cannot be handed; a name repeated after trimming is a typo rather
+    than an instruction to pick one, since the later spelling would silently
+    overwrite the earlier token.
+
+    Windows compares environment names without case, so ``TOKEN`` and ``token``
+    are one variable there: the block a process is handed cannot carry both, and
+    which one wins is not the one typed later. That is a collision to refuse, not
+    a second variable. ``windows`` is for the tests; by default the platform says.
+
+    A value is text: a JSON null is an empty value, not the word ``None``.
+    """
+    if not isinstance(raw, Mapping):
+        raise ConfigError("env must be an object of NAME: value")
+    folded = os.name == "nt" if windows is None else windows
+    env: dict[str, str] = {}
+    # Uppercase spelling -> the name as it was written, for the message.
+    seen: dict[str, str] = {}
+    for raw_name, raw_value in raw.items():
+        name = str(raw_name).strip()
+        if not name or "=" in name or "\x00" in name:
+            raise ConfigError(f"{raw_name!r} is not an environment variable name")
+        if name in env:
+            raise ConfigError(f"{name} is set twice")
+        if folded:
+            earlier = seen.get(name.upper())
+            if earlier is not None:
+                raise ConfigError(f"{earlier} and {name} are the same name on Windows")
+            seen[name.upper()] = name
+        value = "" if raw_value is None else str(raw_value)
+        if "\x00" in value:
+            raise ConfigError(f"{name} holds a null byte")
+        env[name] = value
+    return env
+
+
+def merge_env(existing: Mapping[str, str], raw: Any) -> dict[str, str]:
+    """The environment a save leaves behind.
+
+    The panel sends the whole map, so a variable it dropped is gone rather than
+    silently kept, and an empty map clears it. A save that never mentions env
+    (``None``) keeps what is stored: a token is not something to lose because
+    somebody toggled a server.
+    """
+    if raw is None:
+        return dict(existing)
+    return env_pairs(raw)
+
+
 # --------------------------------------------------------------------------- internals
 
 
@@ -186,9 +240,13 @@ def _row(name: str, entry: Any) -> tuple[dict[str, Any] | None, str]:
     if not isinstance(raw_args, list) or not all(isinstance(arg, str) for arg in raw_args):
         return None, "args has to be a list of strings"
 
-    env = _env(entry.get("env"))
-    if env is None:
-        return None, "env has to be an object of NAME: value pairs"
+    raw_env = entry.get("env")
+    try:
+        # A pasted server without env is one with no variables; one with a
+        # broken env is skipped with the reason the rule gave.
+        env = {} if raw_env is None else env_pairs(raw_env)
+    except ConfigError as exc:
+        return None, str(exc)
 
     # Trust is never read from the paste. A Claude config has no tier field, so
     # one carrying "tier": 0 or "enabled": false was either edited by hand or
@@ -206,18 +264,6 @@ def _row(name: str, entry: Any) -> tuple[dict[str, Any] | None, str]:
         },
         "",
     )
-
-
-def _env(raw: Any) -> dict[str, str] | None:
-    if raw is None:
-        return {}
-    if not isinstance(raw, Mapping):
-        return None
-    # A JSON null is an empty value, not the word "None": a server that needs an
-    # empty variable should get one.
-    return {
-        str(name): "" if value is None else str(value) for name, value in raw.items()
-    }
 
 
 def _placeholders(row: dict[str, Any]) -> list[str]:

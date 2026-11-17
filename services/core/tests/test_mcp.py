@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from capri_core.mcp import (
     clean_schema,
     flatten_result,
     importing,
+    same_row,
     tool_name,
 )
 from capri_core.models import gbnf
@@ -175,6 +177,74 @@ def check_importing() -> None:
     )
     check(saved["env"] == {} and saved["cwd"] == "", "missing env and cwd are written as empty")
 
+    # The environment a save writes. A pasted config and the panel's save are
+    # judged by one rule, so the checks sit next to the writer rather than in
+    # the RPC handler that calls it.
+    check(
+        importing.env_pairs({"TOKEN": "abc", "EMPTY": "", "NULL": None})
+        == {"TOKEN": "abc", "EMPTY": "", "NULL": ""},
+        "env values are text, and a JSON null is an empty value",
+    )
+    for label, raw, wanted in (
+        ("a blank name", {"  ": "x"}, "is not an environment variable name"),
+        ("'=' in a name", {"BAD=NAME": "x"}, "is not an environment variable name"),
+        ("two spellings of one name", {"A": "1", " A ": "2"}, "is set twice"),
+        ("a non-object env", ["A"], "env must be an object of NAME: value"),
+        ("a null byte in a value", {"A": "\x00"}, "holds a null byte"),
+    ):
+        try:
+            importing.env_pairs(raw)
+            check(False, f"{label} is refused")
+        except importing.ConfigError as exc:
+            check(wanted in str(exc), f"{label} is refused: {exc}")
+
+    # Windows compares environment names without case, so the two spellings are
+    # one variable there and one of them would silently win at spawn. Both are
+    # named, because the person has to pick which value they meant.
+    try:
+        importing.env_pairs({"TOKEN": "1", "token": "2"}, windows=True)
+        check(False, "two case spellings are refused on Windows")
+    except importing.ConfigError as exc:
+        check(
+            "TOKEN and token" in str(exc) and "on Windows" in str(exc),
+            f"two case spellings are refused, naming both: {exc}",
+        )
+    check(
+        importing.env_pairs({"TOKEN": "1", "token": "2"}, windows=False)
+        == {"TOKEN": "1", "token": "2"},
+        "elsewhere the two spellings are two variables",
+    )
+    if os.name == "nt":
+        try:
+            importing.env_pairs({"Path": "1", "PATH": "2"})
+            check(False, "the Windows rule is on by default")
+        except importing.ConfigError as exc:
+            check(
+                "Path and PATH" in str(exc),
+                f"the Windows rule is on by default: {exc}",
+            )
+
+    check(
+        importing.merge_env({"TOKEN": "abc"}, None) == {"TOKEN": "abc"},
+        "a save that does not mention env keeps the stored one",
+    )
+    check(
+        importing.merge_env({"TOKEN": "abc"}, {"OTHER": "x"}) == {"OTHER": "x"},
+        "a new map replaces the old one whole",
+    )
+    check(importing.merge_env({"TOKEN": "abc"}, {}) == {}, "an empty map clears it")
+
+    # A pasted server with a broken env is skipped for that reason, not
+    # silently started without the variable it needed.
+    broken_env = importing.parse_config(
+        json.dumps({"mcpServers": {"odd": {"command": "npx", "env": {"A=B": "x"}}}})
+    )
+    check(
+        broken_env["servers"] == []
+        and "not an environment variable name" in broken_env["skipped"][0]["reason"],
+        f"a pasted env that cannot work is a skip with a reason: {broken_env['skipped']}",
+    )
+
 
 async def check_legacy_client() -> None:
     print("legacy client")
@@ -278,7 +348,9 @@ async def check_service() -> None:
 async def check_settings() -> None:
     print("settings panel")
     config = CapriConfig()
-    config.mcp.servers["fake"] = McpServerCfg(command=sys.executable, args=[str(FIXTURE)])
+    config.mcp.servers["fake"] = McpServerCfg(
+        command=sys.executable, args=[str(FIXTURE)], env={"FAKE_TOKEN": "s3cret"}
+    )
     config.mcp.servers["broken"] = McpServerCfg(command="capri-no-such-binary", args=[])
     registry = Registry()
     service = McpService(config, registry)
@@ -296,6 +368,10 @@ async def check_settings() -> None:
             "a healthy row lists its tools",
         )
         check(rows["fake"]["tier"] == 2 and rows["fake"]["enabled"], "and its tier and switch")
+        check(
+            rows["fake"]["env"] == {"FAKE_TOKEN": "s3cret"},
+            f"a row shows the environment it is started with: {rows['fake']['env']}",
+        )
         check(rows["broken"]["tools"] == [], "a failed server lists none")
 
         # What the panel's changes mean: the registry follows without a restart.
@@ -321,6 +397,171 @@ async def check_settings() -> None:
         await service.aclose()
 
 
+async def check_crash() -> None:
+    print("a server that dies")
+    config = CapriConfig()
+    config.mcp.servers["crashy"] = McpServerCfg(
+        command=sys.executable, args=[str(FIXTURE)]
+    )
+    # A process that starts and then exits before the handshake: its reason is
+    # the line it printed on stderr, not the closed pipe the protocol sees.
+    config.mcp.servers["dieearly"] = McpServerCfg(
+        command=sys.executable,
+        args=[
+            "-c",
+            "import sys; sys.stderr.write('no CAPRI_TEST_KEY in the environment\\n'); sys.exit(2)",
+        ],
+    )
+    registry = Registry()
+    service = McpService(config, registry)
+    try:
+        await service.start()
+        rows = {row["name"]: row for row in service.status()}
+        check(rows["crashy"]["running"], "a live server's row says running")
+        check(
+            "mcp.crashy.echo" in registry.names(),
+            "and its tools are callable",
+        )
+        check(
+            "no CAPRI_TEST_KEY" in rows["dieearly"]["error"],
+            f"a boot failure carries what the server printed: {rows['dieearly']['error']}",
+        )
+
+        client = service.clients["crashy"]
+        try:
+            # Not in tools/list: a real server dying is a transport event, and
+            # this is the test's way to cause one.
+            await client.call("crash", {}, timeout_s=5)
+        except McpError:
+            pass
+
+        # The process is reaped asynchronously, so the row is read once it is
+        # actually gone rather than on the turn that killed it.
+        for _ in range(100):
+            if not client.running and client.stderr_tail:
+                break
+            await asyncio.sleep(0.05)
+
+        rows = {row["name"]: row for row in service.status()}
+        row = rows["crashy"]
+        check(not row["running"], "a server that died is not reported running")
+        check(row["tools"] == [], f"its tools are gone from the row: {row['tools']}")
+        check(
+            "mcp.crashy.echo" not in registry.names(),
+            "and from the registry, so nothing offers a tool that cannot run",
+        )
+        check(
+            "exited after it started" in row["error"],
+            f"the row says it exited: {row['error']}",
+        )
+        check(
+            "widget factory exploded" in row["error"],
+            f"and repeats what it printed: {row['error']}",
+        )
+    finally:
+        await service.aclose()
+
+
+async def check_targeted_reload() -> None:
+    print("one save, one restart")
+    config = CapriConfig()
+    for name in ("one", "two"):
+        config.mcp.servers[name] = McpServerCfg(command=sys.executable, args=[str(FIXTURE)])
+    registry = Registry()
+    service = McpService(config, registry)
+    try:
+        await service.start()
+        one, two = service.clients["one"], service.clients["two"]
+        check(one.running and two.running, "both servers are up")
+
+        config.mcp.servers["one"].tier = 0
+        started = await service.reload({"one"})
+        check(started == 1, f"only the named server is started: {started}")
+        check(
+            service.clients["two"] is two and two.running,
+            "the untouched server keeps its process",
+        )
+        check(not one.running, "the changed one was stopped")
+        check(service.clients["one"] is not one, "and started again")
+        spec = registry.get("mcp.one.echo")
+        check(
+            spec is not None and spec.tier == 0,
+            "its tools came back with the new tier",
+        )
+
+        # Switched off: withdrawn on its own, without the other restarting.
+        config.mcp.servers["one"].enabled = False
+        started = await service.reload({"one"})
+        check(started == 0 and "one" not in service.clients, "a switched-off server is stopped")
+        check("mcp.one.echo" not in registry.names(), "and its tools go with it")
+        check(
+            service.clients["two"] is two and two.running,
+            "the other still has its process",
+        )
+
+        # The decision the save handler asks before writing or restarting.
+        row = config.mcp.servers["two"].model_dump(mode="json")
+        check(same_row(row, config.mcp.servers["two"]), "an identical row is unchanged")
+        check(
+            not same_row(dict(row, tier=1), config.mcp.servers["two"]),
+            "a changed tier is a change",
+        )
+        check(not same_row(None, config.mcp.servers["two"]), "a new server is a change")
+    finally:
+        await service.aclose()
+
+
+async def check_probe() -> None:
+    print("trying a server before saving it")
+    config = CapriConfig()
+    registry = Registry()
+    service = McpService(config, registry)
+    try:
+        tried = await service.probe(sys.executable, [str(FIXTURE)], name="draft")
+        check(tried["ok"], f"a working draft starts: {tried['error']!r}")
+        check(
+            [tool["name"] for tool in tried["tools"]] == ["echo", "boom"],
+            "and lists the tools it advertises",
+        )
+        check(
+            registry.names() == [] and service.clients == {},
+            "nothing is registered and nothing is left running",
+        )
+        check(config.mcp.servers == {}, "and the config is untouched")
+
+        missing = await service.probe("capri-no-such-binary", [], name="missing")
+        check(
+            not missing["ok"] and "could not start" in missing["error"],
+            f"a bad command reports why: {missing['error']}",
+        )
+
+        early = await service.probe(
+            sys.executable,
+            ["-c", "import sys; sys.stderr.write('no key here\\n'); sys.exit(2)"],
+            name="early",
+        )
+        check(
+            not early["ok"] and "no key here" in early["error"],
+            f"and a server that dies says what it printed: {early['error']}",
+        )
+
+        # The global switch governs every process, a try included. A command
+        # that does not exist proves nothing was launched: the refusal comes
+        # back instead of the spawn failure.
+        config.mcp.enabled = False
+        off = await service.probe("capri-no-such-binary", [], name="off")
+        check(
+            not off["ok"] and "switched off" in off["error"],
+            f"a try says MCP is off: {off['error']}",
+        )
+        check(
+            "could not start" not in off["error"],
+            "and no process is launched to find out",
+        )
+    finally:
+        await service.aclose()
+
+
 async def main() -> int:
     check_flatten()
     check_schema()
@@ -329,6 +570,9 @@ async def main() -> int:
     await check_modern_client()
     await check_service()
     await check_settings()
+    await check_crash()
+    await check_targeted_reload()
+    await check_probe()
     print()
     if FAILURES:
         print(f"FAILED: {len(FAILURES)} check(s)")

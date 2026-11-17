@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import shutil
+from collections import deque
 from typing import Any, Mapping
 
 from .. import __version__
@@ -94,6 +95,10 @@ class McpClient:
         self._reader: asyncio.Task[None] | None = None
         self._stderr: asyncio.Task[None] | None = None
         self._pending: dict[Any, asyncio.Future[Any]] = {}
+        # The server's own words about a failure. A missing key or a traceback
+        # arrives on stderr, not on the protocol, so the last few lines are kept
+        # for the row that reports it.
+        self._stderr_tail: deque[str] = deque(maxlen=8)
         self._next_id = 0
         self._modern = False
         self.server_info: dict[str, Any] = {}
@@ -108,6 +113,16 @@ class McpClient:
     @property
     def modern(self) -> bool:
         return self._modern
+
+    @property
+    def stderr_tail(self) -> list[str]:
+        """The last few lines the server printed on stderr, oldest first."""
+        return list(self._stderr_tail)
+
+    @property
+    def exit_code(self) -> int | None:
+        """How the process ended, or ``None`` while it is gone without a code."""
+        return None if self._proc is None else self._proc.returncode
 
     async def start(self, timeout_s: float = 10.0) -> None:
         if self._proc is not None:
@@ -179,6 +194,19 @@ class McpClient:
         await self._send(
             {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
         )
+
+    async def settle_stderr(self, timeout_s: float = 0.25) -> None:
+        """Give the stderr reader a moment to catch what the server said dying.
+
+        A process that exits mid-handshake has already written its reason, but
+        the reader is a task, so a message built immediately can be missing the
+        line that matters. Bounded: a server still running never closes stderr.
+        """
+        task = self._stderr
+        if task is None or task.done():
+            return
+        with contextlib.suppress(asyncio.TimeoutError, Exception):
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout_s)
 
     async def close(self) -> None:
         proc, self._proc = self._proc, None
@@ -281,7 +309,11 @@ class McpClient:
                 line = await proc.stderr.readline()
                 if not line:
                     break
-                log.debug("%s stderr: %s", self.name, line.decode("utf-8", "replace").rstrip()[:400])
+                text = line.decode("utf-8", "replace").rstrip()
+                if not text:
+                    continue
+                self._stderr_tail.append(text[:400])
+                log.debug("%s stderr: %s", self.name, text[:400])
         except asyncio.CancelledError:
             raise
         except Exception:
