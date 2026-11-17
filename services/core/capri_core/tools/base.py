@@ -65,6 +65,10 @@ class ToolContext:
     # The loop installs this for tools that need a second, purpose-built
     # approval after staging (Blackwall proposals).
     confirm: Callable[[dict[str, Any]], Awaitable[bool]] | None = None
+    # A confirmation that carries a decision rather than a yes/no (mcp.register:
+    # which servers, trusted how much). The tool proposes the defaults; the
+    # answer comes from the person, and a missing channel means no approval.
+    choose: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None
     # One event to the shell. A tool that acts outside the daemon — moving her
     # own body — asks the shell rather than pretending the daemon can do it.
     emit: Callable[[dict[str, Any]], Awaitable[None]] | None = None

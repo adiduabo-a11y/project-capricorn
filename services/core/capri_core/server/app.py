@@ -166,7 +166,8 @@ class CapriServer:
         self._voice_tasks: set[asyncio.Task[Any]] = set()
         self._reaction_tasks: set[asyncio.Task[Any]] = set()
         self._fake_brain = os.environ.get("CAPRI_FAKE_BRAIN") == "1"
-        self.confirms: dict[str, asyncio.Future[bool]] = {}
+        # bool for an ordinary card, a decision for one that carries tiers.
+        self.confirms: dict[str, asyncio.Future[Any]] = {}
         self._profile_screen_pause = False
         self.scheduler = IdleScheduler(
             config,
@@ -1187,6 +1188,7 @@ class CapriServer:
             session=session,
             emit=emit,
             confirm=lambda request: self._ask_user(client, request),
+            choose=lambda request: self._ask_choice(client, request),
             brain=self.brain,
             registry=self.registry,
             policy=self.policy,
@@ -1275,10 +1277,16 @@ class CapriServer:
                 return
             await asyncio.sleep(0.3 * (attempt + 1))
 
-    async def _ask_user(self, client: Client, request: dict[str, Any]) -> bool:
-        """Emit a confirmation card and wait for the shell's answer."""
+    async def _ask_user(
+        self, client: Client, request: dict[str, Any], *, want: str = "bool"
+    ) -> Any:
+        """Emit a confirmation card and wait for the shell's answer.
+
+        ``want`` is what the card is expected to carry back: a bare approve or
+        deny, or a decision. Silence is never an approval, whatever the shape.
+        """
         confirm_id = str(request["confirmId"])
-        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self.confirms[confirm_id] = future
         await client.send(protocol.event("agent.confirm", **request))
         try:
@@ -1287,9 +1295,19 @@ class CapriServer:
             )
         except asyncio.TimeoutError:
             log.info("confirmation %s timed out", confirm_id)
-            return False
+            return False if want == "bool" else None
         finally:
             self.confirms.pop(confirm_id, None)
+
+    async def _ask_choice(
+        self, client: Client, request: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """A card whose answer is a decision: a yes plus the tiers behind it.
+
+        The tool proposes the thing and its defaults; the person's answer is
+        what gets acted on. No window means no card, and no card means no.
+        """
+        return await self._ask_user(client, request, want="payload")
 
     async def _confirm_respond(
         self, client: Client, params: dict[str, Any]
@@ -1299,8 +1317,22 @@ class CapriServer:
         future = self.confirms.get(confirm_id)
         if future is None or future.done():
             raise RpcError("not_found", f"no pending confirmation {confirm_id!r}")
-        future.set_result(bool(params.get("approved")))
-        return {"confirmId": confirm_id, "approved": bool(params.get("approved"))}
+        approved = bool(params.get("approved"))
+        tiers = params.get("tiers")
+        if "tiers" in params:
+            # A decision card: the tiers the person chose travel with the yes.
+            clean: dict[str, int] = {}
+            if isinstance(tiers, dict):
+                for name, raw in tiers.items():
+                    try:
+                        tier = int(raw)
+                    except (TypeError, ValueError):
+                        continue
+                    clean[str(name)] = max(0, min(tier, 3))
+            future.set_result({"approved": approved, "tiers": clean})
+            return {"confirmId": confirm_id, "approved": approved, "tiers": clean}
+        future.set_result(approved)
+        return {"confirmId": confirm_id, "approved": approved}
 
     async def _tools_list(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
         return {
