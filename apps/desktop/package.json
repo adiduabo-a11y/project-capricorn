@@ -1,6 +1,6 @@
 {
   "name": "@capri/desktop",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "private": true,
   "type": "module",
   "description": "Project Capricorn's projection layer: avatar, speech bubble, settings",
