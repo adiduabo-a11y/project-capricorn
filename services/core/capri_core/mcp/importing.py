@@ -114,6 +114,35 @@ def parse_config(text: str) -> dict[str, Any]:
     return {"servers": rows, "skipped": skipped, "notes": notes, "inputs": declared}
 
 
+# --------------------------------------------------------------------------- writing
+
+
+def row_config(row: Mapping[str, Any], *, tier: int) -> dict[str, Any]:
+    """One parsed row as ``mcp.servers.<name>``: the only shape ever written.
+
+    Both doors — the panel's import and the ``mcp.register`` tool — go through
+    here. They used to build this dict separately and drifted, which is how a
+    panel import once wrote a tier-three server switched on; a process that has
+    already started cannot be un-started by a policy, so ``enabled`` is derived
+    from ``tier`` here and nowhere else.
+    """
+    try:
+        tier = max(0, min(int(tier), 3))
+    except (TypeError, ValueError):
+        tier = DEFAULT_TIER
+    return {
+        "command": str(row["command"]),
+        "args": [str(arg) for arg in row["args"]],
+        # env is written as it was read: an imported server's environment is
+        # the part the panel cannot show, so losing it would leave a server that
+        # starts without its key and fails for no reason.
+        "env": {str(name): str(value) for name, value in row["env"].items()},
+        "cwd": str(row.get("cwd") or ""),
+        "tier": tier,
+        "enabled": tier < 3,
+    }
+
+
 # --------------------------------------------------------------------------- internals
 
 

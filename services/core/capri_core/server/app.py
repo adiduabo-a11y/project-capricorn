@@ -702,18 +702,13 @@ class CapriServer:
         for row in rows:
             name = row["name"]
             try:
-                tier = max(0, min(int(tiers.get(name, row.get("tier", 2))), 3))
+                tier = int(tiers.get(name, row.get("tier", importing.DEFAULT_TIER)))
             except (TypeError, ValueError):
-                tier = 2
-            chosen[name] = tier
-            servers[name] = {
-                "command": row["command"],
-                "args": list(row["args"]),
-                "env": dict(row["env"]),
-                "cwd": row["cwd"],
-                "enabled": tier < 3,
-                "tier": tier,
-            }
+                tier = importing.DEFAULT_TIER
+            # The same writer the panel's import uses, so the switch cannot
+            # drift from the tier: a tier-three server is saved switched off.
+            servers[name] = importing.row_config(row, tier=tier)
+            chosen[name] = servers[name]["tier"]
         try:
             await self._apply_mcp(data, f"mcp.register:{','.join(names)}")
         except RpcError as exc:
@@ -780,17 +775,9 @@ class CapriServer:
             data = self.config.model_dump(mode="json")
             servers = data.setdefault("mcp", {}).setdefault("servers", {})
             for row in rows:
-                # env is written as pasted: an imported server's environment is
-                # the part the panel cannot show, so losing it here would leave
-                # a server that starts without its key and fails for no reason.
-                servers[row["name"]] = {
-                    "command": row["command"],
-                    "args": list(row["args"]),
-                    "env": dict(row["env"]),
-                    "cwd": row["cwd"],
-                    "enabled": bool(row["enabled"]),
-                    "tier": int(row["tier"]),
-                }
+                # One writer for both doors. The row carries the tier the paste
+                # was allowed to have, never one it declared for itself.
+                servers[row["name"]] = importing.row_config(row, tier=row["tier"])
                 imported.append(row["name"])
             await self._apply_mcp(data, f"mcp.import:{len(imported)}")
 

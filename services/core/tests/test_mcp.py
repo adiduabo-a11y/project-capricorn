@@ -10,11 +10,20 @@ wire rather than mocked. No network.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
 from capri_core.config import CapriConfig, McpServerCfg
-from capri_core.mcp import McpClient, McpError, McpService, clean_schema, flatten_result, tool_name
+from capri_core.mcp import (
+    McpClient,
+    McpError,
+    McpService,
+    clean_schema,
+    flatten_result,
+    importing,
+    tool_name,
+)
 from capri_core.models import gbnf
 from capri_core.tools.base import ToolContext
 from capri_core.tools.policy import Policy
@@ -95,6 +104,76 @@ def check_schema() -> None:
     check(bool(grammar) and "root" in grammar, "the cleaned schema compiles to GBNF")
     decision = gbnf.decision_schema(["mcp.fake.echo"])
     check("mcp.fake.echo" in str(decision), "an MCP tool name fits the decision grammar")
+
+
+def check_importing() -> None:
+    print("importing")
+
+    # Two pasted names that clean to one key would overwrite each other in
+    # config.yaml, so the later one is suffixed rather than dropped.
+    dupes = importing.parse_config(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "My Server": {"command": "npx", "args": ["-y", "pkg"]},
+                    "My_Server": {"command": "node", "args": ["server.js"]},
+                }
+            }
+        )
+    )
+    names = [row["name"] for row in dupes["servers"]]
+    check(names == ["My_Server", "My_Server_2"], f"both colliding names survive: {names}")
+    check(any("was already taken" in note for note in dupes["notes"]), "and the rename says why")
+
+    web = importing.parse_config(
+        json.dumps({"mcpServers": {"web": {"url": "https://example.com/mcp"}}})
+    )
+    check(web["servers"] == [], "a url server is not a config row")
+    reason = web["skipped"][0]["reason"]
+    check("url" in reason and "stdio" in reason, f"and says why: {reason}")
+
+    try:
+        importing.parse_config('{\n  "mcpServers": {\n    "fs": {,}\n  }\n}')
+        check(False, "malformed JSON raises ConfigError")
+    except importing.ConfigError as exc:
+        check("line 3" in str(exc), f"malformed JSON points at the position: {exc}")
+
+    # Trust is never read from the paste: a config carrying a tier is not one
+    # Claude wrote, and the decision belongs to the person.
+    sneaky = importing.parse_config(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "sneaky": {
+                        "command": "npx",
+                        "args": [],
+                        "tier": 0,
+                        "enabled": True,
+                    }
+                }
+            }
+        )
+    )
+    row = sneaky["servers"][0]
+    check(row["tier"] == importing.DEFAULT_TIER == 2, f"a pasted tier is ignored: {row['tier']}")
+    check(row["enabled"] is True, "and so is a pasted switch")
+    check(
+        any("sneaky" in note and "ignored" in note for note in sneaky["notes"]),
+        "the paste is told its tier was ignored",
+    )
+
+    # The one writer both doors use: the switch follows the tier, so a tier-3
+    # server can never be saved running.
+    saved = importing.row_config(row, tier=3)
+    check(saved["tier"] == 3 and saved["enabled"] is False, "tier 3 is written switched off")
+    check(importing.row_config(row, tier=2)["enabled"] is True, "tier 2 is written on")
+    check(importing.row_config(row, tier=9)["tier"] == 3, "a tier above the range is clamped")
+    check(importing.row_config(row, tier="nope")["tier"] == 2, "so is one that is not a number")
+    check(
+        set(saved) == {"command", "args", "env", "cwd", "tier", "enabled"},
+        f"the row has exactly the config keys: {sorted(saved)}",
+    )
+    check(saved["env"] == {} and saved["cwd"] == "", "missing env and cwd are written as empty")
 
 
 async def check_legacy_client() -> None:
@@ -245,6 +324,7 @@ async def check_settings() -> None:
 async def main() -> int:
     check_flatten()
     check_schema()
+    check_importing()
     await check_legacy_client()
     await check_modern_client()
     await check_service()
