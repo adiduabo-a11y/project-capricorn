@@ -35,6 +35,7 @@ import { CommandConsole } from './CommandConsole'
 import { petCueFor } from './petCue'
 import { DiffView } from './DiffView'
 import { WorkPanel, type ArtifactEntry } from './WorkPanel'
+import { McpApproveCard, TIERS } from './McpCard'
 import './bubble.css'
 
 type Status = 'connecting' | 'online' | 'offline'
@@ -196,6 +197,9 @@ export default function App() {
   const [streaming, setStreaming] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [confirming, setConfirming] = useState<ConfirmRequest | null>(null)
+  // The bubble has room for one control, not one per server: this picks the
+  // tier for every server on a server card, and nothing approves without it.
+  const [allTier, setAllTier] = useState(2)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [memoryOpen, setMemoryOpen] = useState(false)
   const [memories, setMemories] = useState<MemoryItem[]>([])
@@ -353,7 +357,13 @@ export default function App() {
     async (intent: WakeIntent | undefined, pending: ConfirmRequest | null): Promise<boolean> => {
       if (!intent) return false
       // A card answers to yes/no; closing it counts as "no".
-      if (pending && confirmingRef.current?.confirmId === pending.confirmId) {
+      // A yes/no cannot pick a tier, so it never answers a server card: the
+      // words stay a request and the card stays open.
+      if (
+        pending &&
+        pending.tool !== 'mcp.register' &&
+        confirmingRef.current?.confirmId === pending.confirmId
+      ) {
         setConfirming(null)
         try {
           await capri.call('confirm.respond', {
@@ -597,6 +607,9 @@ export default function App() {
           tierName: event.tierName,
           reason: event.reason,
           timeout: event.timeout,
+          servers: event.servers,
+          skipped: event.skipped,
+          notes: event.notes,
         })
         break
       }
@@ -1276,7 +1289,7 @@ export default function App() {
   )
 
   const answerConfirm = useCallback(
-    async (approved: boolean) => {
+    async (approved: boolean, tiers?: Record<string, number>) => {
       const request = confirming
       if (!request) return
       setConfirming(null)
@@ -1284,6 +1297,9 @@ export default function App() {
         await capri.call('confirm.respond', {
           confirmId: request.confirmId,
           approved,
+          // Sent only when the card carried tiers: an ordinary card stays a
+          // plain yes, exactly as before.
+          ...(tiers ? { tiers } : {}),
         })
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
@@ -1340,6 +1356,16 @@ export default function App() {
       ? (confirming.args as Record<string, unknown>)
       : null
   const networkCard = (blackwall?.network ?? null) as NetworkCard | null
+  // A server card needs its own body (command, env, a tier each) and its own
+  // actions, so the plain approve/deny underneath is suppressed while it shows.
+  const mcpCard =
+    confirming?.tool === 'mcp.register'
+      ? {
+          servers: confirming.servers ?? [],
+          skipped: confirming.skipped ?? [],
+          notes: confirming.notes ?? [],
+        }
+      : null
 
   const busy = streaming !== null || mood === 'thinking' || mood === 'working'
   const canSend = status === 'online' && draft.trim().length > 0 && !streaming && !confirming
@@ -1479,16 +1505,61 @@ export default function App() {
                   <span className="qb-confirm-timer">{confirming.timeout}s</span>
                 </div>
                 <p className="qb-confirm-reason">{confirming.reason}</p>
+                {mcpCard ? (
+                  <p className="qb-confirm-note">
+                    {mcpCard.servers.map((server) => server.name).join(', ')}
+                    {mcpCard.skipped.length > 0
+                      ? ` — unsupported: ${mcpCard.skipped
+                          .map((entry) => entry.name)
+                          .join(', ')}`
+                      : ''}
+                  </p>
+                ) : null}
                 <div className="qb-confirm-actions">
                   <button className="review" onClick={() => openFull('feed')}>
                     review
                   </button>
-                  <button className="deny" onClick={() => void answerConfirm(false)}>
-                    deny
-                  </button>
-                  <button className="approve" onClick={() => void answerConfirm(true)}>
-                    approve
-                  </button>
+                  {mcpCard ? (
+                    <>
+                      <select
+                        className="qb-confirm-pick"
+                        value={allTier}
+                        title="the tier every server on this card gets"
+                        onChange={(event) => setAllTier(Number(event.target.value))}
+                      >
+                        {TIERS.map((tier) => (
+                          <option key={tier.value} value={tier.value}>
+                            {tier.label}
+                          </option>
+                        ))}
+                      </select>
+                      <button className="deny" onClick={() => void answerConfirm(false)}>
+                        deny
+                      </button>
+                      <button
+                        className="approve"
+                        onClick={() =>
+                          void answerConfirm(
+                            true,
+                            Object.fromEntries(
+                              mcpCard.servers.map((server) => [server.name, allTier]),
+                            ),
+                          )
+                        }
+                      >
+                        approve tier {allTier}
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button className="deny" onClick={() => void answerConfirm(false)}>
+                        deny
+                      </button>
+                      <button className="approve" onClick={() => void answerConfirm(true)}>
+                        approve
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             ) : null}
@@ -2061,17 +2132,27 @@ export default function App() {
                   {String(blackwall.diff ?? '')}
                 </pre>
               </div>
+            ) : mcpCard ? (
+              <McpApproveCard
+                key={confirming.confirmId}
+                servers={mcpCard.servers}
+                skipped={mcpCard.skipped}
+                notes={mcpCard.notes}
+                onAnswer={(approved, tiers) => void answerConfirm(approved, tiers)}
+              />
             ) : (
               <pre className="confirm-args">{JSON.stringify(confirming.args, null, 2)}</pre>
             )}
-            <div className="confirm-actions">
-              <button className="deny" onClick={() => void answerConfirm(false)}>
-                deny
-              </button>
-              <button className="approve" onClick={() => void answerConfirm(true)}>
-                approve
-              </button>
-            </div>
+            {mcpCard ? null : (
+              <div className="confirm-actions">
+                <button className="deny" onClick={() => void answerConfirm(false)}>
+                  deny
+                </button>
+                <button className="approve" onClick={() => void answerConfirm(true)}>
+                  approve
+                </button>
+              </div>
+            )}
           </div>
         ) : null}
 

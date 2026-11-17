@@ -51,6 +51,9 @@ class _Seen:
 
 Emit = Callable[[dict[str, Any]], Awaitable[None]]
 Confirm = Callable[[dict[str, Any]], Awaitable[bool]]
+# The answer to a card that asks for more than yes/no; the tool decides what
+# it proposes, the person decides what comes back.
+Choose = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 class SessionLike(Protocol):
@@ -163,12 +166,16 @@ class TurnRunner:
         # The shell asked for work in a window (the app panel), so the screen
         # protocol belongs in the prompt even if the wording is not "look".
         screen_task: bool = False,
+        # Last because Python wants the defaulted parameters together; every
+        # caller names it, so the position is not part of the contract.
+        choose: Choose | None = None,
     ) -> None:
         self.config = config
         self.conn = conn
         self.session = session
         self.emit = emit
         self.confirm = confirm
+        self.choose = choose
         self.brain = brain
         self.registry = registry
         self.policy = policy
@@ -633,6 +640,7 @@ class TurnRunner:
             screen=self.screen,
             cancel=self._cancel,
             confirm=self.confirm,
+            choose=self.choose,
             emit=self.emit,
             policy=self.policy,
             project=self.project,

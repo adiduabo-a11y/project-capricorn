@@ -17,6 +17,22 @@ type Server = {
 type List = { enabled: boolean; servers: Server[] }
 type Saved = List & { ok: boolean; started?: number }
 
+/** What mcp.import answers: the rows it wrote, and what it could not use. */
+type Imported = List & {
+  ok: boolean
+  imported: string[]
+  skipped: { name: string; reason: string }[]
+  notes: string[]
+}
+
+/** The last import, kept on screen until the next one. */
+type Report = {
+  error?: string
+  imported: string[]
+  skipped: { name: string; reason: string }[]
+  notes: string[]
+}
+
 const TIERS = [
   { value: 0, label: 'tier 0 — runs silently' },
   { value: 1, label: 'tier 1 — runs, mentions it' },
@@ -50,6 +66,8 @@ export function McpPanel({ online }: { online: boolean }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [note, setNote] = useState('')
   const [draft, setDraft] = useState({ name: '', command: '', args: '', tier: 2 })
+  const [paste, setPaste] = useState('')
+  const [report, setReport] = useState<Report | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -136,6 +154,30 @@ export function McpPanel({ online }: { online: boolean }) {
       setBusy(null)
     }
   }, [apply, draft])
+
+  const importConfig = useCallback(async () => {
+    const text = paste.trim()
+    if (!text) return
+    setBusy('import')
+    setNote('')
+    setReport(null)
+    try {
+      const next = await capri.call<Imported>('mcp.import', { config: text })
+      setList({ enabled: next.enabled, servers: next.servers })
+      setReport({ imported: next.imported, skipped: next.skipped, notes: next.notes })
+      setNote(
+        next.imported.length
+          ? `imported ${next.imported.length} server${next.imported.length === 1 ? '' : 's'} — restarted with ${next.imported.length === 1 ? 'it' : 'them'}`
+          : 'nothing was imported',
+      )
+      if (next.imported.length) setPaste('')
+    } catch (err) {
+      // A bad paste is a report line, not a lost one: the text stays in the box.
+      setReport({ imported: [], skipped: [], notes: [], error: message(err) })
+    } finally {
+      setBusy(null)
+    }
+  }, [paste])
 
   const setGlobal = useCallback(async (enabled: boolean) => {
     setBusy('global')
@@ -256,6 +298,51 @@ export function McpPanel({ online }: { online: boolean }) {
           add
         </button>
       </div>
+      <div className="mcp-import">
+        <div className="mcp-head">
+          <span className="mcp-title">Import a config</span>
+          <span className="mcp-sub">paste one from Claude Desktop</span>
+        </div>
+        <textarea
+          className="mcp-paste"
+          value={paste}
+          spellCheck={false}
+          placeholder={
+            '{\n  "mcpServers": {\n    "fs": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],\n      "env": { "API_KEY": "…" }\n    }\n  }\n}'
+          }
+          onChange={(event) => setPaste(event.target.value)}
+        />
+        <div className="mcp-add">
+          <button
+            className="mem-sweep"
+            onClick={() => void importConfig()}
+            disabled={!online || busy !== null || paste.trim() === ''}
+          >
+            import
+          </button>
+          <span className="mcp-sub">stdio servers only</span>
+        </div>
+      </div>
+      {report ? (
+        <div className="mcp-report">
+          {report.error ? <div className="mcp-import-line bad">{report.error}</div> : null}
+          {report.imported.map((name) => (
+            <div className="mcp-import-line ok" key={`in-${name}`}>
+              {name} imported
+            </div>
+          ))}
+          {report.skipped.map((entry) => (
+            <div className="mcp-import-line bad" key={`sk-${entry.name}`}>
+              {entry.name} — {entry.reason}
+            </div>
+          ))}
+          {report.notes.map((text) => (
+            <p className="mcp-note" key={`note-${text}`}>
+              {text}
+            </p>
+          ))}
+        </div>
+      ) : null}
       {note ? <p className="mem-note">{note}</p> : null}
     </section>
   )
