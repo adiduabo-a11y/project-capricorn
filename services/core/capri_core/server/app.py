@@ -47,7 +47,8 @@ from ..screen import ScreenService, observation_payload
 from ..store import db
 from ..store.shard import export_shard, import_shard
 from ..tools import Policy, builtin_registry
-from ..tools.policy import resolve_path
+from ..tools.base import ToolContext, ToolResult, ToolSpec
+from ..tools.policy import TIER_NAMES, resolve_path
 from ..voice import SttUnavailable, VoiceService, build_engine
 from ..work import store as work_store
 from ..work.tasks import Task, TaskService
@@ -62,6 +63,40 @@ SENT = object()  # marker: handler already replied / is streaming
 
 # A server name becomes a config key and a tool-name prefix (``mcp.<name>.<tool>``).
 _MCP_NAME = re.compile(r"[A-Za-z0-9_-]{1,32}")
+
+# Adding a server from a conversation. The tool itself only stages a paste; the
+# writing and the starting wait for a card that shows every command and env
+# value and asks for a tier per server. Tier 1 is the honest label: what it does
+# is write a config, and what makes that safe is the approval, not the tier.
+MCP_REGISTER_SPEC = ToolSpec(
+    name="mcp.register",
+    description=(
+        "Add MCP servers from a pasted Claude-Desktop config. Every command, "
+        "argument and environment value is shown before anything is written, and "
+        "each server runs at the trust tier the person chooses. stdio servers "
+        "only; a url server is reported as unsupported."
+    ),
+    params={
+        "type": "object",
+        "properties": {
+            "config": {
+                "type": "string",
+                "description": (
+                    "The config JSON exactly as the person pasted it, "
+                    "including its mcpServers object."
+                ),
+            }
+        },
+        "required": ["config"],
+        "additionalProperties": False,
+    },
+    tier=1,
+    # The card waits for a person, so the call has to outlive the turn's own
+    # tool budget rather than timing out underneath them.
+    timeout_ms=300_000,
+    max_calls_per_turn=1,
+    consent="asks the person first; they choose the tier",
+)
 
 
 def _validation_note(exc: ValidationError) -> str:
@@ -139,6 +174,10 @@ class CapriServer:
             # A legacy install could already own this name; load() rejects it
             # from new proposals, so keep the daemon bootable.
             log.exception("tool.propose was already registered")
+        try:
+            self.registry.register(MCP_REGISTER_SPEC, self._mcp_register)
+        except ValueError:
+            log.exception("mcp.register was already registered")
         if os.environ.get("CAPRI_FAKE_BRAIN") == "1":
             from ..agent.fake import ScriptedBrain
 
@@ -598,6 +637,125 @@ class CapriServer:
             "enabled": bool(self.config.mcp.enabled),
             "servers": self.mcp.status(),
         }
+
+    async def _mcp_register(self, ctx: ToolContext, config: str) -> ToolResult:
+        """Add the servers in a pasted config, at the tiers the person approved.
+
+        Nothing is written and no process is started until the card comes back
+        approved: a server is a program running with the daemon's own rights,
+        and its environment can hold a key. Tier 3 is saved switched off, since
+        a process that has already started cannot be un-started by a policy.
+        """
+        try:
+            parsed = importing.parse_config(str(config or ""))
+        except importing.ConfigError as exc:
+            return ToolResult.error(f"could not read that config: {exc}")
+
+        rows = list(parsed["servers"])
+        skipped = list(parsed["skipped"])
+        if not rows:
+            detail = "; ".join(
+                f"{entry['name']}: {entry['reason']}" for entry in skipped
+            )
+            return ToolResult.error(
+                "nothing to register — " + (detail or "that config has no servers")
+            )
+        if ctx.choose is None:
+            # Fail closed. She can tell the person why instead of claiming an
+            # approval she could not have asked for.
+            return ToolResult.error(
+                "no window is connected to show the approval card, so nothing was "
+                "registered. Ask me again from the app."
+            )
+
+        names = [row["name"] for row in rows]
+        answer = await ctx.choose(
+            {
+                "turnId": ctx.turn_id,
+                "confirmId": f"cfm_{uuid.uuid4().hex[:10]}",
+                "tool": MCP_REGISTER_SPEC.name,
+                "args": {"config": str(config or "")[:4000]},
+                "tier": MCP_REGISTER_SPEC.tier,
+                "tierName": TIER_NAMES.get(MCP_REGISTER_SPEC.tier, "?"),
+                "reason": (
+                    f"{len(rows)} server{'s' if len(rows) != 1 else ''} will be added "
+                    "to the config and started. Choose how much each one is trusted."
+                ),
+                "timeout": self.config.agent.confirm_timeout_s,
+                # The card, in the words the person needs: what runs, with what.
+                "servers": rows,
+                "skipped": skipped,
+                "notes": list(parsed["notes"]),
+            }
+        )
+        if not isinstance(answer, dict) or not answer.get("approved"):
+            return ToolResult.error(
+                "nothing was registered: the person did not approve it. Do not ask "
+                "again unless they say so."
+            )
+
+        raw_tiers = answer.get("tiers")
+        tiers = raw_tiers if isinstance(raw_tiers, dict) else {}
+        data = self.config.model_dump(mode="json")
+        servers = data.setdefault("mcp", {}).setdefault("servers", {})
+        chosen: dict[str, int] = {}
+        for row in rows:
+            name = row["name"]
+            try:
+                tier = max(0, min(int(tiers.get(name, row.get("tier", 2))), 3))
+            except (TypeError, ValueError):
+                tier = 2
+            chosen[name] = tier
+            servers[name] = {
+                "command": row["command"],
+                "args": list(row["args"]),
+                "env": dict(row["env"]),
+                "cwd": row["cwd"],
+                "enabled": tier < 3,
+                "tier": tier,
+            }
+        try:
+            await self._apply_mcp(data, f"mcp.register:{','.join(names)}")
+        except RpcError as exc:
+            return ToolResult.error(
+                f"nothing was registered: {exc.message or exc.code}"
+            )
+
+        status = {row["name"]: row for row in self.mcp.status()}
+        lines: list[str] = []
+        failed = False
+        for name in names:
+            row = status.get(name) or {}
+            tools = [str(tool) for tool in (row.get("tools") or [])]
+            if row.get("error"):
+                failed = True
+                lines.append(
+                    f"{name} (tier {chosen[name]}): saved but did not start — "
+                    f"{row['error']}"
+                )
+            elif chosen[name] >= 3:
+                lines.append(
+                    f"{name} (tier 3): saved, switched off, so nothing runs until "
+                    "its tier is lowered"
+                )
+            elif not row.get("running"):
+                failed = True
+                lines.append(f"{name} (tier {chosen[name]}): saved but is not running")
+            else:
+                listed = ", ".join(tool.split(".", 2)[-1] for tool in tools[:8])
+                lines.append(
+                    f"{name} (tier {chosen[name]}): {len(tools)} "
+                    f"tool{'s' if len(tools) != 1 else ''}"
+                    + (f" — {listed}" if listed else "")
+                )
+        for entry in skipped:
+            lines.append(f"{entry['name']}: not imported — {entry['reason']}")
+
+        return ToolResult(
+            ok=not failed,
+            output="\n".join(lines),
+            data={"mcp": names, "tiers": chosen},
+        )
 
     async def _mcp_import(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
         """Add every server in a pasted Claude-Desktop config.
