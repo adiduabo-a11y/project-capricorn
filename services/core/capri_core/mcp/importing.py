@@ -71,6 +71,7 @@ def parse_config(text: str) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
     used: set[str] = set()
+    trusted_by_paste: list[str] = []
 
     for raw_name, entry in servers.items():
         name = key(raw_name)
@@ -91,6 +92,16 @@ def parse_config(text: str) -> dict[str, Any]:
             skipped.append({"name": name, "reason": reason})
         else:
             rows.append(row)
+            if isinstance(entry, Mapping) and ("tier" in entry or "enabled" in entry):
+                trusted_by_paste.append(name)
+
+    if trusted_by_paste:
+        notes.append(
+            ", ".join(trusted_by_paste)
+            + " came with a trust tier or switch in the paste: ignored. Every "
+            f"imported server starts at tier {DEFAULT_TIER}, and its row in "
+            "Settings is where it is trusted."
+        )
 
     placeholders = sorted({found for row in rows for found in _placeholders(row)})
     if placeholders:
@@ -150,10 +161,10 @@ def _row(name: str, entry: Any) -> tuple[dict[str, Any] | None, str]:
     if env is None:
         return None, "env has to be an object of NAME: value pairs"
 
-    tier = entry.get("tier", DEFAULT_TIER)
-    if isinstance(tier, bool) or not isinstance(tier, int) or not 0 <= tier <= 3:
-        tier = DEFAULT_TIER
-
+    # Trust is never read from the paste. A Claude config has no tier field, so
+    # one carrying "tier": 0 or "enabled": false was either edited by hand or
+    # never written by Claude at all; either way the decision belongs to the
+    # person and the panel, not to the text being imported.
     return (
         {
             "name": name,
@@ -161,8 +172,8 @@ def _row(name: str, entry: Any) -> tuple[dict[str, Any] | None, str]:
             "args": [str(arg) for arg in raw_args],
             "env": env,
             "cwd": str(entry.get("cwd") or "").strip(),
-            "tier": tier,
-            "enabled": entry.get("enabled") is not False,
+            "tier": DEFAULT_TIER,
+            "enabled": True,
         },
         "",
     )
@@ -173,7 +184,11 @@ def _env(raw: Any) -> dict[str, str] | None:
         return {}
     if not isinstance(raw, Mapping):
         return None
-    return {str(name): str(value) for name, value in raw.items()}
+    # A JSON null is an empty value, not the word "None": a server that needs an
+    # empty variable should get one.
+    return {
+        str(name): "" if value is None else str(value) for name, value in raw.items()
+    }
 
 
 def _placeholders(row: dict[str, Any]) -> list[str]:
