@@ -348,7 +348,7 @@ class Router:
         grammar = gbnf.from_schema(schema)
         result = await self.complete(
             msgs, role="planner", grammar=grammar,
-            schema=schema, max_tokens=700,
+            schema=schema, max_tokens=self.cfg.max_output_tokens,
         )
 
         parsed, reason = _parse_decision(result.text, tools)
@@ -374,7 +374,7 @@ class Router:
                     role="planner",
                     grammar=grammar,
                     schema=schema,
-                    max_tokens=900,
+                    max_tokens=self.cfg.max_output_tokens,
                     temperature=_REPAIR_TEMPERATURE,
                     structured=mode,
                 )
@@ -441,7 +441,7 @@ class Router:
         ]
         result = await self.complete(
             ask, role="planner", grammar=grammar, schema=spec.params,
-            max_tokens=900, temperature=_REPAIR_TEMPERATURE,
+            max_tokens=max(900, self.cfg.max_output_tokens), temperature=_REPAIR_TEMPERATURE,
         )
 
         try:

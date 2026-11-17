@@ -103,6 +103,22 @@ class ModelsCfg(_Base):
             "Useful for reasoning models that never finish their output."
         ),
     )
+    # A reasoning model's thinking comes out of the same budget as its answer,
+    # so a small cap truncates the JSON mid-object. Servers that enforce
+    # structured output reject that outright (HTTP 502), which reads as the
+    # model being down. This is the budget for one planner or tool-argument
+    # call, not for a whole turn.
+    max_output_tokens: int = Field(
+        default=4096,
+        ge=256,
+        le=32768,
+        title="Output budget (tokens)",
+        description=(
+            "Most a single planner or tool-argument call may generate, thinking "
+            "included. Raise it if the server reports structured output was cut "
+            "off (finish_reason=length)."
+        ),
+    )
     request_timeout_s: int = Field(
         default=180,
         ge=5,
