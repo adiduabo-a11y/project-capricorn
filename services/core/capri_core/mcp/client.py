@@ -15,6 +15,7 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 from typing import Any, Mapping
 
 from .. import __version__
@@ -114,9 +115,10 @@ class McpClient:
         if not self._command.strip():
             raise McpError(f"{self.name}: no command configured")
         env = {**os.environ, **self._env}
+        command = self._resolve_command()
         try:
             self._proc = await asyncio.create_subprocess_exec(
-                self._command,
+                command,
                 *self._args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
@@ -126,11 +128,31 @@ class McpClient:
                 limit=_BUFFER,
             )
         except (OSError, ValueError) as exc:
-            raise McpError(f"{self.name}: could not start {self._command!r}: {exc}") from exc
+            raise McpError(
+                f"{self.name}: could not start {command!r}: {exc}"
+            ) from exc
 
         self._reader = asyncio.create_task(self._read_stdout(), name=f"mcp:{self.name}:out")
         self._stderr = asyncio.create_task(self._read_stderr(), name=f"mcp:{self.name}:err")
         await self._handshake(timeout_s)
+
+    def _resolve_command(self) -> str:
+        """The command to spawn, with Windows shims resolved to their real file.
+
+        CreateProcess does not apply PATHEXT, so a config saying ``npx`` — which
+        is how almost every published MCP server is written — is not found even
+        though ``npx.cmd`` is on PATH; it fails with WinError 2 and reads as the
+        server being broken. ``shutil.which`` does apply PATHEXT, and Windows
+        runs a batch file by its full path, so resolving is the whole fix. The
+        cmd.exe wrapper is deliberately not used: /c re-parses the line and
+        splits a path like ``C:\\Program Files\\nodejs\\npx.cmd``.
+        """
+        if os.name != "nt":
+            return self._command
+        resolved = shutil.which(self._command)
+        # Not installed: keep the name the config asked for, so the error
+        # names it rather than an empty path.
+        return resolved or self._command
 
     async def _handshake(self, timeout_s: float) -> None:
         try:
