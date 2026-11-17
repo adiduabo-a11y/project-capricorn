@@ -1059,6 +1059,108 @@ summary,
   filter: brightness(1.08);
 }
 
+/* A server approval: what will run, with which environment, at which tier. */
+.confirm-mcp {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 7px;
+}
+
+.confirm-mcp-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.confirm-mcp-head strong {
+  color: var(--amber);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.confirm-mcp-server {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--edge);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.confirm-mcp-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.confirm-mcp-name {
+  color: var(--amber);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.confirm-mcp-tier {
+  font: inherit;
+  font-size: 9px;
+  padding: 1px 3px;
+  color: inherit;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--edge);
+}
+
+.confirm-mcp-command {
+  margin: 0;
+  max-height: 76px;
+}
+
+.confirm-mcp-env {
+  margin: 0;
+  max-height: 96px;
+  color: var(--amber);
+  opacity: 0.85;
+}
+
+.confirm-mcp-where {
+  margin: 0;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.confirm-mcp-skip {
+  padding-left: 7px;
+  border-left: 3px solid #b4544a;
+  color: #d98a80;
+  font-size: 10.5px;
+}
+
+.confirm-mcp-note {
+  margin: 0;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.qb-confirm-note {
+  margin: 0 0 5px;
+  color: var(--faint);
+  font-size: 9.5px;
+}
+
+.qb-confirm-pick {
+  font: inherit;
+  font-size: 9px;
+  padding: 2px 3px;
+  max-width: 116px;
+  color: inherit;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--edge);
+}
+
 /* ------------------------------------------------------------------ composer */
 
 .composer {

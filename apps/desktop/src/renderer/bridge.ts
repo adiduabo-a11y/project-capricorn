@@ -5,6 +5,8 @@
  * owns the socket, so UI reloads never drop a turn.
  */
 
+import type { McpServerDraft } from './McpCard'
+
 export type AgentState = 'idle' | 'thinking' | 'acting' | 'speaking' | 'error' | 'sleeping'
 
 export interface Usage {
@@ -23,6 +25,10 @@ export interface ConfirmRequest {
   tierName: string
   reason: string
   timeout: number
+  /** Only on mcp.register: the servers waiting for a tier. */
+  servers?: McpServerDraft[]
+  skipped?: { name: string; reason: string }[]
+  notes?: string[]
 }
 
 /** A remembered item, as the browser sees it. */
