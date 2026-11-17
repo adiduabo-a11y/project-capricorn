@@ -21,7 +21,14 @@ is the part that needs a person.
   formatting will move. That is `save_config`, not damage.
 - `npm run dev` from the repo root. Ask in the full feed unless a step says
   otherwise.
-- Paste configs into chat **on one line**, or only the first line is sent.
+- Pasted newlines arrive whole. Both composers are textareas
+  (`App.tsx`, `onChange={setDraft}`) and nothing flattens the text after that:
+  `sendText` does `raw.trim()`, `_turn_send` does `text.strip()`, so only
+  leading and trailing whitespace goes. What cuts a message short is *typing*
+  one by hand — plain Enter sends, Shift+Enter is the newline. Two limits that
+  do apply: a message over 32 000 characters is refused with `text too long`,
+  and she composes the `config` argument from the conversation rather than
+  forwarding the paste, so a very long config can come back mistyped.
 - Two kinds of card: a plain card shows the tier chip and a `{ … }` args block.
   A server card replaces that block with one panel per server and has **no bare
   `approve`**.
@@ -29,7 +36,16 @@ is the part that needs a person.
 The paste used by A, B, D, E and G (call it **P1**; use your own Documents path):
 
 ```json
-{"mcpServers":{"fs":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","C:\\Users\\daeme\\Documents"],"env":{"DEMO_KEY":"demo-value"}},"inputs":[]}}
+{
+  "mcpServers": {
+    "fs": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\Users\\daeme\\Documents"],
+      "env": { "DEMO_KEY": "demo-value" }
+    }
+  },
+  "inputs": []
+}
 ```
 
 ---
@@ -109,8 +125,27 @@ this one is a url server (https://example.com/mcp)`.
 already started cannot be un-started by a policy.
 
 **Her reply** — `off3 (tier 3): saved, switched off, so nothing runs until its
-tier is lowered`. `tasklist | findstr npx` shows nothing new, and asking her to
-use it says no such tool.
+tier is lowered`. The settings row shows the `off` chip, and asking her to use
+one of its tools says no such tool.
+
+**Prove no process started** — `tasklist | findstr npx` proves nothing here:
+`npx` is a shim that exits once the real `node.exe` takes over, so it is absent
+whether or not the server ran, and `node` matches a dozen unrelated processes.
+Match the package name in the command line instead, which catches the wrapper
+and the child both:
+
+```powershell
+# run before approving and again after: both must be empty
+Get-CimInstance Win32_Process |
+  Where-Object { $_.CommandLine -like '*server-filesystem*' } |
+  Select-Object ProcessId, Name, CommandLine
+```
+
+The daemon's own record is the second proof: `~/.capri/logs/core.log` (or its
+`.1` backup, if it has rotated) gains `mcp server fs exposes N tool(s)` in A and
+never gains a `mcp server off3 exposes …` line. Nothing but an enabled server is
+started — `McpService.start` filters the rest out — so a tier-3 row cannot spawn
+anything at all.
 
 ---
 
