@@ -551,6 +551,21 @@ With `voice.tts: tone` the pipeline is exercisable offline.
       Input device is selected in Settings and stored per PC
       (`capri.micInput.v1`), with a fallback to the system default when the
       saved device is gone.
+- [x] Updates install themselves. The shell owns an `electron-updater`
+      instance built from the `publish` block electron-builder now writes into
+      the app (`resources/app-update.yml`), checks GitHub shortly after launch
+      and every six hours after that, downloads the installer `latest.yml` names,
+      and installs it silently in place when the app quits — or immediately if
+      the person clicks the chip. The header grows one `UpdateChip`: `checking…`,
+      `update 0.5.2 · 42%`, `restart for 0.5.2`, `up to date`, or
+      `update failed — retry` with the reason in the tooltip. Dev runs, smoke
+      runs and unpacked builds report `unsupported` and never touch the feed.
+      Verified end to end on Windows 11: 0.5.1 installed to a temp directory found
+      the 0.5.2 release, downloaded the 268,444,205-byte installer (sha512
+      recorded in the pending update), and after an ordinary window close the
+      installed `app.asar` reported 0.5.2 — the installer ran silently and
+      replaced it in place. 0.5.0/0.5.1 shipped before the feed existed, so those
+      need one manual install; every release after does not.
 - [x] MCP servers are managed from Settings. Before this, a server meant
       editing `config.yaml` and restarting the daemon, and a typo produced a
       silent no-show. `mcp.servers` / `mcp.save` / `mcp.remove` / `mcp.reload`

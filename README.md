@@ -26,6 +26,27 @@ it. Windows x64. The installer is unsigned, so Windows SmartScreen will ask you
 to confirm — "More info" → "Run anyway". Python, the sidecar and the required
 runtime extras are bundled; there is nothing else to install.
 
+## Updates
+
+The packaged app updates itself. Shortly after launch — and every six hours
+after that — it asks GitHub for the newest release; if there is one, it
+downloads the installer named in `latest.yml`, checks its SHA-512 and runs it
+silently **in place**: the app closes, the files are replaced, and it comes back
+up on the new version. Nothing is downloaded when there is nothing newer, and a
+dev run or an unpacked build never checks at all, because there is no installed
+app to replace.
+
+The header says where it is: `update 0.5.2 · 42%` while downloading,
+`restart for 0.5.2` when it is ready, `up to date` when the feed has nothing for
+you. Quitting installs it anyway — the chip only saves the wait.
+
+Verified end to end on Windows 11 from 0.5.1 to 0.5.2: the app found the
+release, downloaded the 256 MB installer in the background, and after an ordinary
+window close the installed `app.asar` reported 0.5.2.
+
+Releases before 0.5.2 predate the feed and cannot update themselves; if you are
+on one of those, install the current release by hand once.
+
 ---
 
 ## Status
