@@ -403,9 +403,15 @@ export type PetCue =
 
 /** One stored message, as `session.info` hands it back. */
 export interface SessionMessage {
+  /** The row's own id: the cursor `session.history` pages back from. */
+  id?: number
   role: string
   content: string
   created_at: number
+  /** Tool rows carry what ran, with what, and what came back. */
+  tool_name?: string | null
+  tool_args?: string | null
+  tool_result?: string | null
 }
 
 /** The conversation the daemon is holding for this shell. */
@@ -414,7 +420,15 @@ export interface SessionInfo {
   episodeId: number
   subject: string
   messages: SessionMessage[]
+  /** Every stored row: more than `messages` means the window is the tail only. */
+  totalMessages?: number
   turns: string[]
+}
+
+/** One page of rows above the oldest message the panel holds. */
+export interface HistoryPage {
+  messages: SessionMessage[]
+  hasMore: boolean
 }
 
 export interface CapriBridge {

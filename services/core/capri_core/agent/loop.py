@@ -141,6 +141,15 @@ class ActResult:
     observation: str
     ran: bool
     attachments: list[Any] = field(default_factory=list)
+    # What the step was, for a transcript rebuilt from the shard. The
+    # observation alone cannot be turned back into a chip: it is prose, already
+    # prefixed and shaped for the planner.
+    name: str = ""
+    args: dict[str, Any] = field(default_factory=dict)
+    ok: bool = False
+    tier: int = 0
+    output: str = ""
+    ms: int = 0
 
 
 class TurnRunner:
@@ -400,7 +409,13 @@ class TurnRunner:
                 Msg("user", acted.observation, attachments=acted.attachments)
             )
             self.session.add_message(
-                turn_id, "tool", acted.observation, task_id=self.task_id
+                turn_id,
+                "tool",
+                acted.observation,
+                task_id=self.task_id,
+                tool_name=acted.name,
+                tool_args=json.dumps(acted.args, ensure_ascii=False, default=str),
+                tool_result=acted.output,
             )
 
             # Three refused steps in a row means the planner is stuck, not
@@ -499,7 +514,12 @@ class TurnRunner:
         )
         self._trace_tool(turn_id, name, args, ok=False, ms=0, reason=reason or output)
         return ActResult(
-            observation=f"{observe.OBSERVATION_PREFIX}{name}] {output}", ran=False
+            observation=f"{observe.OBSERVATION_PREFIX}{name}] {output}",
+            ran=False,
+            name=name,
+            args=dict(args or {}),
+            tier=tier,
+            output=output,
         )
 
     async def _act(
@@ -705,6 +725,12 @@ class TurnRunner:
             observation=observation,
             ran=True,
             attachments=list(result.attachments or ()),
+            name=name,
+            args=args,
+            ok=bool(result.ok),
+            tier=verdict.tier,
+            output=shown,
+            ms=int(result.ms or 0),
         )
 
     # ------------------------------------------------------------------ utils

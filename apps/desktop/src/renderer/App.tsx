@@ -29,7 +29,9 @@ import {
   type WakeResult,
   type WorkArtifact,
   type WorkArtifactRef,
+  type HistoryPage,
   type SessionInfo,
+  type SessionMessage,
   type WorkspaceInfo,
 } from './bridge'
 import { CommandConsole } from './CommandConsole'
@@ -103,11 +105,13 @@ interface ToolEntry {
   turnId: string
   name: string
   args: Record<string, unknown>
-  ok: boolean
+  // Absent on a row rebuilt from the shard: only the live event knows whether
+  // the call succeeded, and how long it took.
+  ok?: boolean
   tier: number
   tierName: string
   output: string
-  ms: number
+  ms?: number
   artifact?: WorkArtifactRef
 }
 
@@ -127,7 +131,71 @@ interface CiteEntry {
   items: Citation[]
 }
 
-type Entry = MessageEntry | ToolEntry | StepEntry | CiteEntry
+// A fact about the feed itself, not part of the conversation: the rebuilt
+// transcript stops before the start, and this says so at the top.
+interface NoteEntry {
+  kind: 'note'
+  id: string
+  text: string
+}
+
+type Entry = MessageEntry | ToolEntry | StepEntry | CiteEntry | NoteEntry
+
+// Stored rows are the transcript: the shapes the live events build, so a reload
+// and a running turn render alike. Ids are the shard's own, which keeps pages
+// from colliding when older ones are loaded above.
+function transcriptEntries(rows: SessionMessage[]): Entry[] {
+  const rebuilt: Entry[] = []
+  rows.forEach((row, index) => {
+    const id = `h_${row.id ?? index}`
+    if (row.role === 'user' || row.role === 'assistant') {
+      rebuilt.push({
+        kind: 'message',
+        id,
+        turnId: '',
+        role: row.role,
+        text: String(row.content ?? ''),
+      })
+      return
+    }
+    // Rows stored before the name was kept have nothing to rebuild a chip from,
+    // and their content is already the planner's prose.
+    if (row.role !== 'tool' || !row.tool_name) return
+    rebuilt.push({
+      kind: 'tool',
+      id,
+      turnId: '',
+      name: String(row.tool_name),
+      args: parseToolArgs(row.tool_args),
+      tier: 0,
+      tierName: '',
+      output: String(row.tool_result ?? row.content ?? ''),
+    })
+  })
+  return rebuilt
+}
+
+function earlierNote(remaining: number): NoteEntry {
+  const label =
+    remaining === 1
+      ? '1 earlier message'
+      : remaining > 0
+        ? `${remaining} earlier messages`
+        : 'Earlier messages'
+  return { kind: 'note', id: 'h_more', text: `${label} not loaded — load earlier` }
+}
+
+// Stored tool arguments are JSON text; a row that cannot be parsed still
+// deserves a chip, just one without an argument summary.
+function parseToolArgs(raw: string | null | undefined): Record<string, unknown> {
+  if (!raw) return {}
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
 
 interface Toast {
   key: string
@@ -264,6 +332,12 @@ export default function App() {
   const activeTurn = useRef<string | null>(null)
   const logRef = useRef<HTMLDivElement | null>(null)
   const bubbleLogRef = useRef<HTMLDivElement | null>(null)
+  // The transcript's paging cursor, how much is still above it, and the scroll
+  // height from before older rows were inserted above the reader.
+  const oldestRef = useRef(0)
+  const remainingRef = useRef(0)
+  const loadingEarlier = useRef(false)
+  const prependRef = useRef<number | null>(null)
   const stepSeq = useRef(0)
   const toolSeq = useRef(0)
   const memoryOpenRef = useRef(false)
@@ -533,22 +607,45 @@ export default function App() {
   const hydrateTranscript = useCallback(async () => {
     try {
       const info = await capri.call<SessionInfo>('session.info')
-      const rows = (info.messages ?? []).filter(
-        (row) => row.role === 'user' || row.role === 'assistant',
-      )
+      const rows = info.messages ?? []
       if (!rows.length) return
+      const hidden = Math.max(0, Number(info.totalMessages ?? rows.length) - rows.length)
+      oldestRef.current = Number(rows[0]?.id ?? 0)
+      remainingRef.current = hidden
       setEntries((prev) => {
         if (prev.length) return prev
-        return rows.map((row, index) => ({
-          kind: 'message' as const,
-          id: `h_${index}`,
-          turnId: '',
-          role: row.role === 'user' ? ('user' as const) : ('assistant' as const),
-          text: String(row.content ?? ''),
-        }))
+        const rebuilt = transcriptEntries(rows)
+        return hidden ? [earlierNote(hidden), ...rebuilt] : rebuilt
       })
     } catch {
       /* the next connect asks again */
+    }
+  }, [])
+
+  // Older messages go in above what is on screen: the cursor walks back a page
+  // at a time and the reader keeps the line they were looking at.
+  const loadEarlier = useCallback(async () => {
+    const before = oldestRef.current
+    if (!before || loadingEarlier.current) return
+    loadingEarlier.current = true
+    prependRef.current = logRef.current?.scrollHeight ?? bubbleLogRef.current?.scrollHeight ?? null
+    try {
+      const page = await capri.call<HistoryPage>('session.history', { before, limit: 50 })
+      const older = transcriptEntries(page.messages ?? [])
+      if (page.messages?.length) {
+        oldestRef.current = Number(page.messages[0].id ?? before)
+        remainingRef.current = Math.max(0, remainingRef.current - page.messages.length)
+      }
+      setEntries((prev) => {
+        const rest = prev.filter((entry) => entry.kind !== 'note')
+        return page.hasMore
+          ? [earlierNote(remainingRef.current), ...older, ...rest]
+          : [...older, ...rest]
+      })
+    } catch {
+      prependRef.current = null
+    } finally {
+      loadingEarlier.current = false
     }
   }, [])
 
@@ -1217,13 +1314,28 @@ export default function App() {
 
   useEffect(() => {
     const node = logRef.current
-    if (node) node.scrollTop = node.scrollHeight
+    if (!node) return
+    const before = prependRef.current
+    if (before !== null) {
+      // Older rows were added above: hold the line the reader was on.
+      prependRef.current = null
+      node.scrollTop += node.scrollHeight - before
+      return
+    }
+    node.scrollTop = node.scrollHeight
   }, [entries, error, confirming, uiMode])
 
   useEffect(() => {
     if (uiMode !== 'bubble') return
     const node = bubbleLogRef.current
-    if (node) node.scrollTop = node.scrollHeight
+    if (!node) return
+    const before = prependRef.current
+    if (before !== null) {
+      prependRef.current = null
+      node.scrollTop += node.scrollHeight - before
+      return
+    }
+    node.scrollTop = node.scrollHeight
   }, [entries, error, confirming, uiMode])
 
   useEffect(() => {
@@ -2184,6 +2296,19 @@ export default function App() {
           ) : null}
 
           {entries.map((entry) => {
+            if (entry.kind === 'note') {
+              return (
+                <button
+                  key={entry.id}
+                  type="button"
+                  className="feed-cut action"
+                  onClick={() => void loadEarlier()}
+                >
+                  {entry.text}
+                </button>
+              )
+            }
+
             if (entry.kind === 'cites') {
               return (
                 <div key={entry.id} className="cites">
@@ -2217,12 +2342,14 @@ export default function App() {
 
             if (entry.kind === 'tool') {
               return (
-                <details key={entry.id} className={`tool ${entry.ok ? 'ok' : 'bad'}`}>
+                <details key={entry.id} className={`tool ${entry.ok === false ? 'bad' : entry.ok ? 'ok' : ''}`}>
                   <summary>
                     <span className="tool-name">{entry.name}</span>
-                    <span className="tool-tier" data-tier={entry.tier}>
-                      {entry.tierName}
-                    </span>
+                    {entry.tierName ? (
+                      <span className="tool-tier" data-tier={entry.tier}>
+                        {entry.tierName}
+                      </span>
+                    ) : null}
                     <span className="tool-args">{summariseArgs(entry.args)}</span>
                     <span className="spacer" />
                     {entry.artifact ? (
@@ -2237,7 +2364,9 @@ export default function App() {
                         {entry.artifact.kind}
                       </button>
                     ) : null}
-                    <span className="tool-ms">{entry.ms}ms</span>
+                    {typeof entry.ms === 'number' ? (
+                      <span className="tool-ms">{entry.ms}ms</span>
+                    ) : null}
                   </summary>
                   <pre className="tool-out">{entry.output || '(no output)'}</pre>
                 </details>

@@ -749,6 +749,35 @@ summary,
   line-height: 1.55;
 }
 
+/* The rebuilt transcript is the tail of the conversation; this marks the cut. */
+.feed-cut {
+  padding: 2px 0 8px 10px;
+  border-left: 1px solid var(--dash);
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+
+/* The same line, but it walks the transcript back a page. */
+.feed-cut.action {
+  display: block;
+  width: 100%;
+  background: none;
+  border: 0;
+  border-left: 1px solid var(--dash);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.feed-cut.action:hover {
+  color: var(--paper);
+  opacity: 1;
+}
+
 .msg {
   display: grid;
   gap: 2px;

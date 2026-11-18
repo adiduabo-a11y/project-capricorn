@@ -9,6 +9,7 @@ temp shard under a temp ``CAPRI_HOME``.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -282,6 +283,18 @@ async def test_ceiling_pauses(tmp: Path, config: CapriConfig) -> None:
     )
     await runner.run("trn_ceiling", "Read both files and tell me what they do")
 
+    stored = conn.execute(
+        "SELECT tool_name, tool_args, tool_result FROM messages"
+        " WHERE role = 'tool' AND turn_id = 'trn_ceiling' ORDER BY id"
+    ).fetchall()
+    check(len(stored) == 2, f"both tool steps are stored: {len(stored)}")
+    check(stored[0]["tool_name"] == "fs.read", "a stored step keeps the tool's name")
+    check(
+        json.loads(str(stored[0]["tool_args"]))["path"] == str(project / "one.py"),
+        "and the arguments it was called with",
+    )
+    check(bool(stored[0]["tool_result"]), "and what it returned")
+
     paused = tasks.get(task.id)
     check(paused.status == "paused", "the step ceiling pauses the task instead of finishing it")
     check(paused.result == "none", "a paused task is not marked passed or failed")
@@ -509,6 +522,65 @@ def test_session_resume() -> None:
     check(Session.resume(conn).recent_messages(5) == [], "which starts empty")
 
 
+def test_tool_rows() -> None:
+    """A tool row keeps what the panel needs to rebuild its chip."""
+    conn = open_shard()
+    session = Session.create(conn)
+    session.add_message(
+        "trn_tool",
+        "tool",
+        "[observed] fs.read] ok\nhello",
+        tool_name="fs.read",
+        tool_args='{"path": "a.txt"}',
+        tool_result="hello",
+    )
+    row = session.recent_messages(5)[-1]
+    check(row["tool_name"] == "fs.read", "the tool name is stored")
+    check(json.loads(str(row["tool_args"])) == {"path": "a.txt"}, "its arguments are stored")
+    check(row["tool_result"] == "hello", "and what it returned")
+    check(row["content"] == "[observed] fs.read] ok\nhello", "beside the planner's observation")
+    check(session.message_count() == 1, "the session counts every stored row")
+    for index in range(130):
+        session.add_message("trn_tool", "user", f"line {index}")
+    window = session.recent_messages(50)
+    check(len(window) == 50, "the panel's window is bounded")
+    check(session.message_count() == 131, "and the count still says how much is held")
+
+    page, more = session.messages_page(int(window[0]["id"]), 50)
+    check(len(page) == 50 and more is True, "a page walks back from the oldest row held")
+    check(page[-1]["id"] == int(window[0]["id"]) - 1, "and stops just above it")
+    check([row["id"] for row in page] == sorted(row["id"] for row in page),
+          "a page reads oldest first")
+    rest, more = session.messages_page(int(page[0]["id"]), 50)
+    check(len(rest) == 31 and more is False, f"the start of the conversation ends it: {len(rest)}")
+    check(rest[-1]["id"] == int(page[0]["id"]) - 1, "with no row repeated between pages")
+
+
+async def test_history_rpc() -> None:
+    """`session.history` pages back from the cursor the panel holds."""
+    from capri_core.server.app import CapriServer, RpcError
+
+    conn = open_shard()
+    server = CapriServer.__new__(CapriServer)
+    session = Session.create(conn)
+    for index in range(3):
+        session.add_message("trn_h", "user", f"line {index}")
+    client = types.SimpleNamespace(session=session)
+
+    window = session.recent_messages(2)
+    page = await server._session_history(client, {"before": int(window[0]["id"]), "limit": 2})
+    check(len(page["messages"]) == 1 and page["hasMore"] is False,
+          f"the page holds what is above the cursor: {len(page['messages'])}")
+    check(page["messages"][0]["content"] == "line 0", "and reads oldest first")
+
+    raised = ""
+    try:
+        await server._session_history(client, {})
+    except RpcError as exc:
+        raised = exc.code
+    check(raised == "invalid_args", f"a page without a cursor is refused: {raised}")
+
+
 def test_session_note() -> None:
     """A spoken acknowledgement is conversation, not a turn."""
     conn = open_shard()
@@ -569,6 +641,10 @@ async def main() -> int:
         await test_session_note_rpc()
         print("session resume")
         test_session_resume()
+        print("tool rows")
+        test_tool_rows()
+        print("history paging")
+        await test_history_rpc()
         print("summary")
         test_summary_and_observations(tmp)
         print("ceiling")

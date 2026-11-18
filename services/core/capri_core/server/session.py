@@ -114,11 +114,39 @@ class Session:
 
     def recent_messages(self, limit: int = 40) -> list[dict[str, object]]:
         rows = self.conn.execute(
-            "SELECT role, content, created_at FROM messages WHERE episode_id = ?"
-            " ORDER BY id DESC LIMIT ?",
+            "SELECT id, role, content, tool_name, tool_args, tool_result, created_at"
+            " FROM messages WHERE episode_id = ? ORDER BY id DESC LIMIT ?",
             (self.episode_id, limit),
         ).fetchall()
         return [dict(row) for row in reversed(rows)]
+
+    def messages_page(
+        self, before: int, limit: int = 50
+    ) -> tuple[list[dict[str, object]], bool]:
+        """Rows older than `before`, oldest first, plus whether any remain.
+
+        Paging by id rather than offset keeps a page stable while new messages
+        are appended: the window the panel reads only ever grows at the end.
+        """
+        rows = self.conn.execute(
+            "SELECT id, role, content, tool_name, tool_args, tool_result, created_at"
+            " FROM messages WHERE episode_id = ? AND id < ? ORDER BY id DESC LIMIT ?",
+            (self.episode_id, before, limit + 1),
+        ).fetchall()
+        page = [dict(row) for row in reversed(rows[:limit])]
+        return page, len(rows) > limit
+
+    def message_count(self) -> int:
+        """Every row this conversation has, however many the caller asked for.
+
+        The panel hydrates from a bounded window; the count is what tells it
+        that the transcript it rebuilt is the end of a longer conversation.
+        """
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS total FROM messages WHERE episode_id = ?",
+            (self.episode_id,),
+        ).fetchone()
+        return int(row["total"] or 0)
 
     def cancel_all(self) -> None:
         for turn_id, task in list(self.turns.items()):

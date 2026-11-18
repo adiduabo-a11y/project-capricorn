@@ -290,6 +290,7 @@ class CapriServer:
             "screen.launch": self._screen_launch,
             "screen.clipboard": self._screen_clipboard,
             "screen.act": self._screen_act,
+            "session.history": self._session_history,
             "session.info": self._session_info,
             "session.new": self._session_new,
             "session.note": self._session_note,
@@ -443,9 +444,26 @@ class CapriServer:
             "episodeId": session.episode_id,
             "subject": session.subject,
             "messages": session.recent_messages(50),
+            # So the panel can say when the transcript it got is only the tail.
+            "totalMessages": session.message_count(),
             "turns": [t for t, task in session.turns.items() if not task.done()],
             "workspace": self.workspaces.current(),
         }
+
+    async def _session_history(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
+        """One page further back in the conversation the panel is showing.
+
+        `before` is the id of the oldest row the panel holds; the page is what
+        sits above it, oldest first, so a rebuilt transcript can walk back past
+        the window `session.info` hands out.
+        """
+        session = self._require_session(client)
+        before = int(params.get("before") or 0)
+        if before <= 0:
+            raise RpcError("invalid_args", "before is required")
+        limit = max(1, min(200, int(params.get("limit") or 50)))
+        messages, has_more = session.messages_page(before, limit)
+        return {"messages": messages, "hasMore": has_more}
 
     async def _session_note(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
         """Record a line she said outside a turn, without starting one.
