@@ -416,6 +416,9 @@ class TurnRunner:
                 tool_name=acted.name,
                 tool_args=json.dumps(acted.args, ensure_ascii=False, default=str),
                 tool_result=acted.output,
+                tool_ok=acted.ok,
+                tool_tier=acted.tier,
+                tool_ms=acted.ms,
             )
 
             # Three refused steps in a row means the planner is stuck, not

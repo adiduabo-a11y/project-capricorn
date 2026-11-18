@@ -74,11 +74,15 @@ class Session:
         tool_name: str | None = None,
         tool_args: str | None = None,
         tool_result: str | None = None,
+        tool_ok: bool | None = None,
+        tool_tier: int | None = None,
+        tool_ms: int | None = None,
         task_id: str | None = None,
     ) -> int:
         cur = self.conn.execute(
             "INSERT INTO messages (episode_id, turn_id, role, content, tool_name,"
-            " tool_args, tool_result, task_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " tool_args, tool_result, tool_ok, tool_tier, tool_ms, task_id, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 self.episode_id,
                 turn_id,
@@ -87,6 +91,9 @@ class Session:
                 tool_name,
                 tool_args,
                 tool_result,
+                None if tool_ok is None else int(tool_ok),
+                tool_tier,
+                tool_ms,
                 task_id or None,
                 _now_ms(),
             ),
@@ -114,7 +121,8 @@ class Session:
 
     def recent_messages(self, limit: int = 40) -> list[dict[str, object]]:
         rows = self.conn.execute(
-            "SELECT id, role, content, tool_name, tool_args, tool_result, created_at"
+            "SELECT id, role, content, tool_name, tool_args, tool_result,"
+            " tool_ok, tool_tier, tool_ms, created_at"
             " FROM messages WHERE episode_id = ? ORDER BY id DESC LIMIT ?",
             (self.episode_id, limit),
         ).fetchall()
@@ -129,7 +137,8 @@ class Session:
         are appended: the window the panel reads only ever grows at the end.
         """
         rows = self.conn.execute(
-            "SELECT id, role, content, tool_name, tool_args, tool_result, created_at"
+            "SELECT id, role, content, tool_name, tool_args, tool_result,"
+            " tool_ok, tool_tier, tool_ms, created_at"
             " FROM messages WHERE episode_id = ? AND id < ? ORDER BY id DESC LIMIT ?",
             (self.episode_id, before, limit + 1),
         ).fetchall()

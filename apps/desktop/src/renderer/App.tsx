@@ -161,15 +161,20 @@ function transcriptEntries(rows: SessionMessage[]): Entry[] {
     // Rows stored before the name was kept have nothing to rebuild a chip from,
     // and their content is already the planner's prose.
     if (row.role !== 'tool' || !row.tool_name) return
+    // NULL means the row predates these columns: the chip renders without the
+    // state, badge and timing rather than guessing them.
+    const tier = row.tool_tier ?? null
     rebuilt.push({
       kind: 'tool',
       id,
       turnId: '',
       name: String(row.tool_name),
       args: parseToolArgs(row.tool_args),
-      tier: 0,
-      tierName: '',
+      ok: row.tool_ok === null || row.tool_ok === undefined ? undefined : Boolean(row.tool_ok),
+      tier: tier ?? 0,
+      tierName: tier === null ? '' : (TIER_LABELS[tier] ?? ''),
       output: String(row.tool_result ?? row.content ?? ''),
+      ms: row.tool_ms === null || row.tool_ms === undefined ? undefined : Number(row.tool_ms),
     })
   })
   return rebuilt
@@ -183,6 +188,15 @@ function earlierNote(remaining: number): NoteEntry {
         ? `${remaining} earlier messages`
         : 'Earlier messages'
   return { kind: 'note', id: 'h_more', text: `${label} not loaded — load earlier` }
+}
+
+// The daemon's own names for the policy tiers; a stored row keeps the number.
+const TIER_LABELS: Record<number, string> = {
+  0: 'observe',
+  1: 'act.benign',
+  2: 'act.destructive',
+  3: 'act.blocked',
+  4: 'blackwall',
 }
 
 // Stored tool arguments are JSON text; a row that cannot be parsed still

@@ -412,6 +412,10 @@ export interface SessionMessage {
   tool_name?: string | null
   tool_args?: string | null
   tool_result?: string | null
+  /** And how it went: 1/0 for success, the policy tier, and the duration. */
+  tool_ok?: number | null
+  tool_tier?: number | null
+  tool_ms?: number | null
 }
 
 /** The conversation the daemon is holding for this shell. */

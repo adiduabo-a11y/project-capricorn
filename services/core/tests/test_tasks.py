@@ -284,8 +284,8 @@ async def test_ceiling_pauses(tmp: Path, config: CapriConfig) -> None:
     await runner.run("trn_ceiling", "Read both files and tell me what they do")
 
     stored = conn.execute(
-        "SELECT tool_name, tool_args, tool_result FROM messages"
-        " WHERE role = 'tool' AND turn_id = 'trn_ceiling' ORDER BY id"
+        "SELECT tool_name, tool_args, tool_result, tool_ok, tool_tier, tool_ms"
+        " FROM messages WHERE role = 'tool' AND turn_id = 'trn_ceiling' ORDER BY id"
     ).fetchall()
     check(len(stored) == 2, f"both tool steps are stored: {len(stored)}")
     check(stored[0]["tool_name"] == "fs.read", "a stored step keeps the tool's name")
@@ -294,6 +294,8 @@ async def test_ceiling_pauses(tmp: Path, config: CapriConfig) -> None:
         "and the arguments it was called with",
     )
     check(bool(stored[0]["tool_result"]), "and what it returned")
+    check(stored[0]["tool_ok"] == 1 and stored[0]["tool_tier"] is not None
+          and stored[0]["tool_ms"] >= 0, "and that it succeeded, at a tier, with a duration")
 
     paused = tasks.get(task.id)
     check(paused.status == "paused", "the step ceiling pauses the task instead of finishing it")
@@ -533,12 +535,19 @@ def test_tool_rows() -> None:
         tool_name="fs.read",
         tool_args='{"path": "a.txt"}',
         tool_result="hello",
+        tool_ok=False,
+        tool_tier=2,
+        tool_ms=37,
     )
     row = session.recent_messages(5)[-1]
     check(row["tool_name"] == "fs.read", "the tool name is stored")
     check(json.loads(str(row["tool_args"])) == {"path": "a.txt"}, "its arguments are stored")
     check(row["tool_result"] == "hello", "and what it returned")
     check(row["content"] == "[observed] fs.read] ok\nhello", "beside the planner's observation")
+    check((row["tool_ok"], row["tool_tier"], row["tool_ms"]) == (0, 2, 37),
+          f"and how it went, at what tier, for how long: {row['tool_ok']}")
+    columns = {info["name"] for info in conn.execute("PRAGMA table_info(messages)")}
+    check({"tool_ok", "tool_tier", "tool_ms"} <= columns, "the shard carries the new columns")
     check(session.message_count() == 1, "the session counts every stored row")
     for index in range(130):
         session.add_message("trn_tool", "user", f"line {index}")
@@ -552,6 +561,8 @@ def test_tool_rows() -> None:
     check([row["id"] for row in page] == sorted(row["id"] for row in page),
           "a page reads oldest first")
     rest, more = session.messages_page(int(page[0]["id"]), 50)
+    check(rest[0]["tool_tier"] == 2 and rest[0]["tool_ms"] == 37,
+          "an older page carries the same outcome as the newest window")
     check(len(rest) == 31 and more is False, f"the start of the conversation ends it: {len(rest)}")
     check(rest[-1]["id"] == int(page[0]["id"]) - 1, "with no row repeated between pages")
 
