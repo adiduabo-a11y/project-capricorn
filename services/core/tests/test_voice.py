@@ -32,7 +32,16 @@ from capri_core.config import CapriConfig
 from capri_core.server.session import Session
 from capri_core.store import db
 from capri_core.tools import Policy, builtin_registry
-from capri_core.voice import ToneEngine, VoiceService, match_command, match_wake, schedule, split_sentences
+from capri_core.voice import (
+    ToneEngine,
+    VoiceService,
+    acknowledge,
+    address_only,
+    match_command,
+    match_wake,
+    schedule,
+    split_sentences,
+)
 from capri_core.voice import dsp
 from capri_core.voice import wav as wav_mod
 from capri_core.voice.stt import SttUnavailable, Transcript
@@ -452,7 +461,23 @@ async def test_wake_intent(config: CapriConfig) -> None:
     check(answer["command"] == "stop the server", f"the request survives: {answer['command']!r}")
 
     bare = VoiceService(config, ToneEngine(config), stt=WakeStt("Capri."))
-    check((await bare.wake(b"RIFF fake wav"))["intent"] is None, "a bare name carries no intent")
+    greeting = await bare.wake(b"RIFF fake wav")
+    check(greeting["intent"] is None, "a bare name carries no intent")
+    check(greeting["command"] == "", "and no request: it cannot become a turn")
+    check(bool(greeting["reply"]), f"a bare name is answered with a line: {greeting.get('reply')!r}")
+    check("fix" not in greeting["reply"].lower(), "the answer does not assume work")
+
+    doubled = VoiceService(config, ToneEngine(config), stt=WakeStt("Hey, Capri, Capri."))
+    repeated = await doubled.wake(b"RIFF fake wav")
+    check(
+        repeated["matched"] and repeated["command"] == "" and repeated["reply"],
+        "a doubled name is still a greeting, not a request",
+    )
+
+    named = VoiceService(config, ToneEngine(config), stt=WakeStt("Capri, open the terminal."))
+    request_hit = await named.wake(b"RIFF fake wav")
+    check(request_hit["reply"] == "", "a real request gets no greeting line")
+    check(request_hit["command"] == "open the terminal", "and still carries the request")
 
     unsure = VoiceService(config, ToneEngine(config), stt=WakeStt("Capri, yes", confidence=0.1))
     check((await unsure.wake(b"RIFF fake wav"))["intent"] is None, "a rejected candidate has no intent")
@@ -553,6 +578,16 @@ async def test_warm(config: CapriConfig) -> None:
     check(engine.status()["loaded"] is False, "status carries the loaded flag")
 
 
+def _at_hour(hour: int) -> float:
+    """A timestamp whose local hour is `hour`, without depending on DST."""
+    stamp = time.time()
+    for _ in range(48):
+        if time.localtime(stamp).tm_hour == hour:
+            return stamp
+        stamp -= 1800
+    return stamp
+
+
 def test_wake_matching() -> None:
     hit = match_wake("Capri, open the terminal.")
     check(hit.matched, "her name at the start wakes")
@@ -561,6 +596,25 @@ def test_wake_matching() -> None:
     check(match_wake("hey capri what time is it").command == "what time is it", "a lead-in is ignored")
     bare = match_wake("Capri.")
     check(bare.matched and bare.command == "", "a bare name wakes with no request")
+    check(bare.bare, "and is flagged as only her name")
+    addressed = match_wake("Hey, Capri.")
+    check(
+        addressed.matched and addressed.command == "" and addressed.bare,
+        "the recogniser's comma does not turn her name into a request",
+    )
+    doubled = match_wake("Hey, Capri, Capri")
+    check(doubled.bare, "a doubled name is still only her name")
+    check(not match_wake("Capri, open the terminal.").bare, "a request after the name is not bare")
+    check(
+        address_only("hey capri") and not address_only("capri, open it"),
+        "address_only separates a greeting from an instruction",
+    )
+
+    line = acknowledge()
+    check(0 < len(line) <= 40, f"the answer to a bare name is one short line: {line!r}")
+    check("fix" not in line.lower(), "and it never assumes there is something to fix")
+    for hour in (3, 12, 21):
+        check(len(acknowledge(_at_hour(hour))) <= 40, f"hour {hour} still answers in one line")
     check(not match_wake("I told capri to stop").matched, "a name mid-sentence does not wake")
     check(match_wake("capree, play something").matched, "whisper's spelling of the name wakes")
     check(match_wake("kapri, lights").matched, "a K spelling wakes")
@@ -708,6 +762,16 @@ async def test_follow_up(config: CapriConfig) -> None:
     hit = await service.follow_up(b"RIFF fake wav")
     check(hit["accepted"], f"a clear sentence is accepted: {hit.get('reason')}")
     check(hit["text"] == "and open the notes", "the sentence comes back without her name")
+    check(not hit["bare"], "an ordinary sentence is not just her name")
+    check(hit["reply"] == "", "so it gets no greeting line")
+
+    # Her name again inside an open window is still a greeting, not a request.
+    named = VoiceService(config, ToneEngine(config), stt=WakeStt("Hey, Capri."), conn=conn)
+    again = await named.follow_up(b"RIFF fake wav")
+    check(again["accepted"], "a repeated name is heard")
+    check(again["bare"], "and flagged as only her name")
+    check(bool(again["reply"]), f"and answered, not run: {again.get('reply')!r}")
+    check(again["text"] == "Hey, Capri.", "the transcript is still reported")
 
     # The television cannot hold the floor: the same gate that guards a wake.
     tv = VoiceService(

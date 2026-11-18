@@ -828,6 +828,23 @@ export default function App() {
     }
   }, [finishPtt, status, stopBarge])
 
+  /**
+   * Answer a wake that held only her name. It is a line, not a turn: nothing is
+   * planned and nothing is edited, so her name alone can never become a work
+   * request. It goes on the feed and through her voice.
+   */
+  const speakWakeReply = useCallback((line: string) => {
+    const turnId = `wake_${Date.now()}`
+    bargedRef.current = false
+    setEntries((prev) => [
+      ...prev,
+      { kind: 'message', id: `a_${turnId}`, turnId, role: 'assistant', text: line },
+    ])
+    void capri.call('voice.speak', { turnId, text: line }).catch(() => {
+      // Without a voice the line still lands on screen, and the floor opens.
+    })
+  }, [])
+
   /** One utterance the wake monitor heard. Her name decides if it was for her. */
   const handleWakeUtterance = useCallback(
     async (audioUrl: string) => {
@@ -843,6 +860,14 @@ export default function App() {
           const text = result.text?.trim() ?? ''
           if (!result.accepted || !text) {
             closeFloor()
+            return
+          }
+          // Her name again, inside the window: still only her name. Answer it
+          // and keep the floor rather than turning it into a request.
+          if (result.bare) {
+            const line = result.reply?.trim() ?? ''
+            if (line) speakWakeReply(line)
+            openFloor(line ? '' : 'Go ahead.')
             return
           }
           const sent = await submitRef.current(text)
@@ -865,15 +890,19 @@ export default function App() {
           else setDraft(command)
           return
         }
-        // A bare "Capri": she waits for the sentence that follows it.
-        openFloor('Go ahead.')
+        // A bare "Capri": she answers it out loud, then holds the floor for
+        // the sentence that follows. The utterance was her name and nothing
+        // else, so it is never sent as a turn.
+        const reply = hit.reply?.trim() ?? ''
+        if (reply) speakWakeReply(reply)
+        openFloor(reply ? '' : 'Go ahead.')
       } catch {
         // A wake that could not be transcribed is not worth a banner; the
         // microphone stays open and the next sentence can be the one.
         wakePending.current = false
       }
     },
-    [applyWakeIntent, closeFloor, openFloor],
+    [applyWakeIntent, closeFloor, openFloor, speakWakeReply],
   )
 
   // "Capri, ..." without a button. The renderer owns the microphone; the daemon

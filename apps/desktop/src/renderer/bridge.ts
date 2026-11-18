@@ -344,6 +344,9 @@ export interface FollowUpResult {
   reason?: 'low-confidence' | 'no-speech' | 'empty' | 'disabled'
   confidence?: number
   noSpeechProb?: number
+  /** The sentence was only her name again, so it is answered, not run. */
+  bare?: boolean
+  reply?: string
 }
 
 /** What `voice.calibrate` measured: room, voice, and the limits they imply. */
@@ -370,6 +373,8 @@ export interface WakeResult {
   matched: boolean
   command?: string
   intent?: WakeIntent
+  /** Her answer when the utterance was only her name. A line, not a turn. */
+  reply?: string
 }
 
 export type WindowAction = 'minimize' | 'hide' | 'close' | 'toggle' | 'show'

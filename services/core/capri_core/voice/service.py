@@ -25,7 +25,7 @@ from .commands import match_command
 from .stt import SttUnavailable, build_stt
 from .tts import TtsEngine, TtsUnavailable, active_voice
 from .visemes import DEFAULT_FPS, schedule
-from .wake import match_wake
+from .wake import acknowledge, address_only, match_wake
 
 log = logging.getLogger("capri.voice")
 
@@ -427,12 +427,17 @@ class VoiceService:
         hit = match_wake(result["text"])
         if hit.matched and self.config.voice.barge_in:
             await self.barge_in()
-        # What follows the name may not be a request at all: "yes", "stop".
+        # A name on its own is answered, not executed. The reply is a line she
+        # says; the command stays empty, so nothing downstream can turn her name
+        # into a turn. What follows the name may still not be a request at all:
+        # "yes", "stop" carry an intent instead.
+        reply = acknowledge() if hit.matched and hit.bare else ""
         return {
             **result,
             "matched": hit.matched,
-            "command": hit.command,
-            "intent": match_command(hit.command) if hit.matched else None,
+            "command": "" if hit.bare else hit.command,
+            "intent": match_command(hit.command) if hit.matched and not hit.bare else None,
+            "reply": reply,
         }
 
     async def follow_up(
@@ -457,7 +462,15 @@ class VoiceService:
             return self._reject_follow_up(result, "no-speech")
         if not str(result.get("text") or "").strip():
             return self._reject_follow_up(result, "empty")
-        return {**result, "accepted": True}
+        # Saying her name again is not a request, and an open window does not
+        # make it one: it is the same greeting, answered the same way.
+        bare = address_only(result["text"])
+        return {
+            **result,
+            "accepted": True,
+            "bare": bare,
+            "reply": acknowledge() if bare else "",
+        }
 
     @staticmethod
     def _rejection(result: dict[str, Any], reason: str) -> dict[str, Any]:

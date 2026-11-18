@@ -502,10 +502,12 @@ function setSpeechMuted(muted) {
 
 /**
  * Turn the wake word on or off from the tray or its hotkey. The write goes to
- * the config, so Settings shows the same switch; the UI hears about it before
- * the round trip and is told to put the switch back if the daemon refuses.
+ * the config, so Settings shows the same switch. The panel is told only after
+ * that write has landed: it answers by re-reading `voice.status`, so an event
+ * sent ahead of the round trip would hand it the old value and put the switch
+ * straight back. On a refused write the mirror is restored and the panel told.
  */
-function toggleWake(next) {
+async function toggleWake(next) {
   const value = typeof next === 'boolean' ? next : !wakeEnabled
   const push = () => {
     if (win && !win.isDestroyed() && rendererReady) {
@@ -514,13 +516,17 @@ function toggleWake(next) {
   }
   wakeEnabled = value
   updateTray()
-  push()
-  void call('config.set', { path: 'voice.wake.enabled', value }).catch((err) => {
+  try {
+    await call('config.set', { path: 'voice.wake.enabled', value })
+    push()
+    return wakeEnabled
+  } catch (err) {
     wakeEnabled = !value
     updateTray()
     push()
     console.log(`[shell] wake word switch failed: ${err.message}`)
-  })
+    return wakeEnabled
+  }
 }
 
 function createTray() {
@@ -1388,10 +1394,7 @@ ipcMain.handle('capri:call', async (_event, method, params) => {
 
 // The panel's wake chip goes through the shell, so the tray cannot disagree
 // with it: one path toggles, one event comes back.
-ipcMain.handle('capri:toggle-wake', () => {
-  toggleWake()
-  return wakeEnabled
-})
+ipcMain.handle('capri:toggle-wake', () => toggleWake())
 
 // The renderer read the config; the tray follows it rather than the reverse.
 ipcMain.on('capri:wake-state', (event, enabled) => {

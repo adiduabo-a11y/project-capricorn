@@ -17,7 +17,20 @@ from ..tools.base import ToolSpec, consent_note, signature
 
 DEFAULT_PACK = "kyoko"
 
+# A greeting, and the ways it is written down. Punctuation has already become
+# whitespace by the time this is matched: the recogniser writes "Hey, Capri."
+# with a comma even when the sentence is nothing but her name.
+_GREETING = (
+    r"(?:hi|hey|hello|yo|hiya|good (?:morning|afternoon|evening)"
+    r"|how are you(?: doing)?|how'?s it going|what'?s up|sup|having fun"
+    r"|are you there|you there)"
+)
+_ACK = r"(?:ok(?:ay)?|cool|nice|great|thanks|thank you|cheers|lol|haha|nvm|never ?mind)"
+# Her name on its own is someone getting her attention, not a job order.
+_ADDRESS = r"(?:capri|there)"
+
 # Whole-message pleasantries only, so "ok, now add a footer" is still work.
+# They may follow each other: "Hey, Capri, how are you?" is still not a request.
 _CONVERSATION = re.compile(
     r"\bi (didn'?t|did not) ask\b"
     r"|\bi didn'?t (want|mean)\b"
@@ -30,11 +43,8 @@ _CONVERSATION = re.compile(
     # Whole message only: "stop" gives the floor back, "stop the server" is
     # work with an instruction in it.
     r"|^\s*(?:stop|enough)(?:\s+capri)?\s*$"
-    r"|^\s*(?:(?:hi|hey|hello|yo|hiya|good (?:morning|afternoon|evening)"
-    r"|how are you(?: doing)?|how'?s it going|what'?s up|sup|having fun"
-    r"|are you there|you there)(?:\s+(?:capri|there))?"
-    r"|(?:ok(?:ay)?|cool|nice|great|thanks|thank you|cheers|lol|haha|nvm|never ?mind))"
-    r"\s*[.!?,…]*\s*$",
+    r"|^\s*(?:(?:" + _GREETING + r"|" + _ACK + r"|capri)(?:\s+" + _ADDRESS + r")?\s*)+"
+    r"[.!?,…]*\s*$",
     re.IGNORECASE,
 )
 
@@ -46,7 +56,8 @@ _NO_REQUEST = """## Nothing to do yet
 Nothing was asked for: this is a greeting, an acknowledgement, or a check that
 you are there. Answer as yourself and let them bring the work. Do not open by
 asking what needs fixing, what to work on or what the task is, do not reach for
-a tool, and do not invent something to do. One short line is enough."""
+a tool, and do not invent something to do. Warmth first — they came to see you,
+not to file a ticket — and stay yourself: one short line is enough."""
 
 
 def looks_like_conversation(text: str) -> bool:
@@ -54,7 +65,10 @@ def looks_like_conversation(text: str) -> bool:
     stripped = (text or "").strip()
     if not stripped:
         return True
-    return bool(_CONVERSATION.search(stripped))
+    # A pause is written as a comma, not a clause: "Hey, Capri." is a greeting
+    # and must not reach the work planner just because the recogniser paused.
+    spoken = re.sub(r"\s+", " ", re.sub(r"[,;:]", " ", stripped)).strip()
+    return bool(_CONVERSATION.search(spoken))
 
 # The conventions file is guidance, not a document. If it is longer than this
 # it is being used as a dumping ground, and it crowds out the actual request.

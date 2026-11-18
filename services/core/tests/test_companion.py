@@ -448,6 +448,13 @@ async def test_chatter_register_and_prompt() -> None:
         ("thanks!", True),
         ("what's up", True),
         ("", True),
+        # The recogniser writes the pause: "Hey, Capri." was her whole opener.
+        ("Hey, Capri.", True),
+        ("Capri?", True),
+        ("okay capri", True),
+        ("hey, capri, how are you?", True),
+        ("capri, fix the failing build", False),
+        ("hey capri stop the server", False),
         ("ok, now add a footer", False),
         ("fix the failing build", False),
         ("stop the server", False),

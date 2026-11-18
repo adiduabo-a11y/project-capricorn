@@ -10,7 +10,7 @@ from .service import VoiceService, split_sentences
 from .stt import FasterWhisperEngine, SttUnavailable, Transcript, build_stt
 from .tts import Audio, KokoroEngine, ToneEngine, TtsUnavailable, build_engine
 from .visemes import schedule
-from .wake import Wake, match_wake
+from .wake import Wake, acknowledge, address_only, match_wake
 
 __all__ = [
     "Audio",
@@ -25,6 +25,8 @@ __all__ = [
     "TtsUnavailable",
     "VoiceService",
     "Wake",
+    "acknowledge",
+    "address_only",
     "build_engine",
     "build_stt",
     "install_voice_state",
