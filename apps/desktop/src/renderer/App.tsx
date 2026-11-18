@@ -285,6 +285,13 @@ export default function App() {
   // "Capri" was said alone: the next utterance is the request.
   const wakePending = useRef(false)
   const wakeFollowUp = useRef<number | null>(null)
+  // Her answer to a bare name: the listening window opens when the line has
+  // finished playing, not when it was queued.
+  const wakeReply = useRef<{ pending: boolean; started: boolean; fallback: number | null }>({
+    pending: false,
+    started: false,
+    fallback: null,
+  })
   const mutedRef = useRef(false)
   const mutedStopped = useRef(false)
   // After a local barge-in, do not enqueue the rest of that turn's segments.
@@ -301,6 +308,13 @@ export default function App() {
     if (wakeFollowUp.current !== null) {
       window.clearTimeout(wakeFollowUp.current)
       wakeFollowUp.current = null
+    }
+    const ack = wakeReply.current
+    ack.pending = false
+    ack.started = false
+    if (ack.fallback !== null) {
+      window.clearTimeout(ack.fallback)
+      ack.fallback = null
     }
     setFloorOpen(false)
   }, [])
@@ -329,6 +343,23 @@ export default function App() {
     clearWakeFollowUp()
     setVoiceNote('')
   }, [clearWakeFollowUp])
+
+  /**
+   * Her line to a bare "Capri" is over, so the listening window starts now.
+   * Opening it at the queue instead spent the first second of the window on
+   * her own answer.
+   */
+  const finishWakeReply = useCallback(() => {
+    const ack = wakeReply.current
+    if (!ack.pending) return
+    ack.pending = false
+    ack.started = false
+    if (ack.fallback !== null) {
+      window.clearTimeout(ack.fallback)
+      ack.fallback = null
+    }
+    openFloor()
+  }, [openFloor])
 
   // A command becomes a turn, and nothing can be submitted while one is
   // running, so the window opens when she is done rather than while she works.
@@ -833,17 +864,30 @@ export default function App() {
    * planned and nothing is edited, so her name alone can never become a work
    * request. It goes on the feed and through her voice.
    */
-  const speakWakeReply = useCallback((line: string) => {
-    const turnId = `wake_${Date.now()}`
-    bargedRef.current = false
-    setEntries((prev) => [
-      ...prev,
-      { kind: 'message', id: `a_${turnId}`, turnId, role: 'assistant', text: line },
-    ])
-    void capri.call('voice.speak', { turnId, text: line }).catch(() => {
-      // Without a voice the line still lands on screen, and the floor opens.
-    })
-  }, [])
+  const speakWakeReply = useCallback(
+    (line: string) => {
+      const turnId = `wake_${Date.now()}`
+      bargedRef.current = false
+      setEntries((prev) => [
+        ...prev,
+        { kind: 'message', id: `a_${turnId}`, turnId, role: 'assistant', text: line },
+      ])
+      // A muted speaker or a missing engine makes no sound at all, so the
+      // window opens now: there is no line to wait for.
+      if (mutedRef.current || voiceStatusRef.current?.available === false) {
+        openFloor()
+        return
+      }
+      const ack = wakeReply.current
+      ack.pending = true
+      ack.started = false
+      // An engine that says it is available but never produces a segment is a
+      // failure, not a long answer. The window opens rather than staying shut.
+      ack.fallback = window.setTimeout(finishWakeReply, 2500)
+      void capri.call('voice.speak', { turnId, text: line }).catch(() => finishWakeReply())
+    },
+    [finishWakeReply, openFloor],
+  )
 
   /** One utterance the wake monitor heard. Her name decides if it was for her. */
   const handleWakeUtterance = useCallback(
@@ -867,7 +911,7 @@ export default function App() {
           if (result.bare) {
             const line = result.reply?.trim() ?? ''
             if (line) speakWakeReply(line)
-            openFloor(line ? '' : 'Go ahead.')
+            else openFloor('Go ahead.')
             return
           }
           const sent = await submitRef.current(text)
@@ -895,7 +939,7 @@ export default function App() {
         // else, so it is never sent as a turn.
         const reply = hit.reply?.trim() ?? ''
         if (reply) speakWakeReply(reply)
-        openFloor(reply ? '' : 'Go ahead.')
+        else openFloor('Go ahead.')
       } catch {
         // A wake that could not be transcribed is not worth a banner; the
         // microphone stays open and the next sentence can be the one.
@@ -904,6 +948,23 @@ export default function App() {
     },
     [applyWakeIntent, closeFloor, openFloor, speakWakeReply],
   )
+
+  // `speaking` is true while the player still owes audio on her line, so its
+  // fall is the real end of the answer. The window opens there, not at the
+  // moment the sentence was queued.
+  useEffect(() => {
+    const ack = wakeReply.current
+    if (!ack.pending) return
+    if (speaking) {
+      ack.started = true
+      if (ack.fallback !== null) {
+        window.clearTimeout(ack.fallback)
+        ack.fallback = null
+      }
+      return
+    }
+    if (ack.started) finishWakeReply()
+  }, [speaking, finishWakeReply])
 
   // "Capri, ..." without a button. The renderer owns the microphone; the daemon
   // decides whether the sentence opened with her name. Off while she speaks or
