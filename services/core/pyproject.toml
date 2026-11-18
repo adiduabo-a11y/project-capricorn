@@ -1,6 +1,6 @@
 [project]
 name = "capri-core"
-version = "0.5.8"
+version = "0.5.9"
 description = "Capri agent daemon: reasoning, memory, tools, voice, screen"
 requires-python = ">=3.12,<3.13"
 dependencies = [
