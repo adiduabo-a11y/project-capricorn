@@ -176,6 +176,15 @@
   animation: wake-pulse 2.6s ease-in-out infinite;
 }
 
+/* A candidate she heard but could not trust: the same dot, warm and brief.
+ * The keyframes live in styles.css, which the bubble shares. */
+.qb-wake[data-heard] .qb-wake-dot {
+  border-color: rgba(240, 176, 106, 0.92);
+  background: rgba(240, 176, 106, 0.92);
+  box-shadow: 0 0 6px rgba(240, 176, 106, 0.75);
+  animation: wake-heard 1.4s ease-out;
+}
+
 /* The follow-up window: the microphone takes the next sentence without her
  * name, so the header says whose turn it is — and clicking it gives it back. */
 .qb-floor {

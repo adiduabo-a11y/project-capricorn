@@ -42,6 +42,29 @@ class Session:
         )
         return cls(subject=subject, conn=conn, episode_id=int(cur.lastrowid or 0))
 
+    @classmethod
+    def resume(cls, conn: sqlite3.Connection, subject: str = paths.DEFAULT_SUBJECT) -> Session | None:
+        """The conversation the shell was last reading, or None on a new shard.
+
+        A reconnect is not a new chat: the panel reloads, asks ``session.info``
+        for what it was showing, and the planner replays the same history. The
+        episode is reopened so it keeps what it said and so retention, which
+        only touches closed episodes, leaves it alone. A chat started with
+        ``session.new`` is the newest episode and is what a later connect gets.
+        """
+        row = conn.execute(
+            "SELECT id FROM episodes WHERE subject = ? ORDER BY id DESC LIMIT 1",
+            (subject,),
+        ).fetchone()
+        if row is None:
+            return None
+        episode_id = int(row["id"])
+        conn.execute(
+            "UPDATE episodes SET ended_at = NULL WHERE id = ? AND ended_at IS NOT NULL",
+            (episode_id,),
+        )
+        return cls(subject=subject, conn=conn, episode_id=episode_id)
+
     def add_message(
         self,
         turn_id: str,
@@ -69,6 +92,19 @@ class Session:
             ),
         )
         return int(cur.lastrowid or 0)
+
+    def add_note(self, content: str, turn_id: str | None = None) -> str:
+        """Record an assistant line said outside a turn — a wake acknowledgement.
+
+        It belongs in the conversation: the planner reads these rows through
+        ``recent_messages`` and ``session.info`` hands them back. It is not work
+        either — no turn is registered and nothing is planned — so the row keeps
+        a note id instead of a turn id, and the shell's own id is reused when it
+        has one so the spoken line and this row agree.
+        """
+        turn = turn_id or f"note_{uuid.uuid4().hex[:10]}"
+        self.add_message(turn, "assistant", content)
+        return turn
 
     def add_tokens(self, estimate: int) -> None:
         self.conn.execute(

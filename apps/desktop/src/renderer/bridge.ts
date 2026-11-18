@@ -375,6 +375,8 @@ export interface WakeResult {
   intent?: WakeIntent
   /** Her answer when the utterance was only her name. A line, not a turn. */
   reply?: string
+  /** Why a candidate was dropped. Absent when the sentence simply was not hers. */
+  reason?: 'low-confidence' | 'no-speech' | 'disabled'
 }
 
 export type WindowAction = 'minimize' | 'hide' | 'close' | 'toggle' | 'show'
@@ -398,6 +400,22 @@ export type PetCue =
   | 'watch'
   | 'settle'
   | 'dance'
+
+/** One stored message, as `session.info` hands it back. */
+export interface SessionMessage {
+  role: string
+  content: string
+  created_at: number
+}
+
+/** The conversation the daemon is holding for this shell. */
+export interface SessionInfo {
+  sessionId: string
+  episodeId: number
+  subject: string
+  messages: SessionMessage[]
+  turns: string[]
+}
 
 export interface CapriBridge {
   call<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>

@@ -29,6 +29,7 @@ import {
   type WakeResult,
   type WorkArtifact,
   type WorkArtifactRef,
+  type SessionInfo,
   type WorkspaceInfo,
 } from './bridge'
 import { CommandConsole } from './CommandConsole'
@@ -248,6 +249,9 @@ export default function App() {
   const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'transcribing'>('idle')
   // The microphone is actually open and watching for her name.
   const [wakeArmed, setWakeArmed] = useState(false)
+  // A candidate she heard but could not trust: the dot says so instead of
+  // staying silent.
+  const [wakeHeard, setWakeHeard] = useState<'' | 'unsure' | 'quiet'>('')
   // The follow-up window is open: the next sentence needs no name.
   const [floorOpen, setFloorOpen] = useState(false)
   // A command was accepted; the floor opens once she has finished with it.
@@ -292,6 +296,10 @@ export default function App() {
     started: false,
     fallback: null,
   })
+  // When the last cue played, so a noisy room cannot turn her into a tic. The
+  // first one is always allowed, however soon after the panel opened it lands.
+  const wakeCueAt = useRef(-Infinity)
+  const wakeCueTimer = useRef<number | null>(null)
   const mutedRef = useRef(false)
   const mutedStopped = useRef(false)
   // After a local barge-in, do not enqueue the rest of that turn's segments.
@@ -360,6 +368,34 @@ export default function App() {
     }
     openFloor()
   }, [openFloor])
+
+  /**
+   * A dropped candidate is not nothing. `voice.wake` reports the gate's reason
+   * — the same one `voice.status` keeps as `lastRejection` — so a candidate
+   * that sounded like words but scored too low gets a quiet "Hm?" and the dot
+   * flashes warm; a candidate the recogniser judged to be no speech at all only
+   * flashes. Throttled, because the room talks to itself all day.
+   */
+  const noteRejectedWake = useCallback((reason?: WakeResult['reason']) => {
+    if (reason !== 'low-confidence' && reason !== 'no-speech') return
+    const now = performance.now()
+    if (now - wakeCueAt.current < 12_000) return
+    wakeCueAt.current = now
+    setWakeHeard(reason === 'low-confidence' ? 'unsure' : 'quiet')
+    if (wakeCueTimer.current !== null) window.clearTimeout(wakeCueTimer.current)
+    wakeCueTimer.current = window.setTimeout(() => {
+      wakeCueTimer.current = null
+      setWakeHeard('')
+    }, 1400)
+    // "No speech" means there was nothing to answer; only a candidate that
+    // sounded like words gets a word back. A running turn keeps her quiet too.
+    if (reason !== 'low-confidence') return
+    if (activeTurn.current || mutedRef.current) return
+    if (voiceStatusRef.current?.available === false) return
+    void capri
+      .call('voice.speak', { turnId: `cue_${Date.now()}`, text: 'Hm?' })
+      .catch(() => undefined)
+  }, [])
 
   // A command becomes a turn, and nothing can be submitted while one is
   // running, so the window opens when she is done rather than while she works.
@@ -489,6 +525,32 @@ export default function App() {
     setWorkOpen(false)
     setDraft('')
   }, [clearWakeFollowUp, status, stopBarge])
+
+  // A reload starts with an empty feed; the daemon still holds the
+  // conversation it was showing. Fill it once from the session itself, and only
+  // while nothing has been said on this screen, so a live reconnect never
+  // rewrites what is already there.
+  const hydrateTranscript = useCallback(async () => {
+    try {
+      const info = await capri.call<SessionInfo>('session.info')
+      const rows = (info.messages ?? []).filter(
+        (row) => row.role === 'user' || row.role === 'assistant',
+      )
+      if (!rows.length) return
+      setEntries((prev) => {
+        if (prev.length) return prev
+        return rows.map((row, index) => ({
+          kind: 'message' as const,
+          id: `h_${index}`,
+          turnId: '',
+          role: row.role === 'user' ? ('user' as const) : ('assistant' as const),
+          text: String(row.content ?? ''),
+        }))
+      })
+    } catch {
+      /* the next connect asks again */
+    }
+  }, [])
 
   const handleEvent = useCallback((event: CoreEvent) => {
     // A turn the reset superseded can still deliver deltas and tool events on
@@ -868,6 +930,9 @@ export default function App() {
     (line: string) => {
       const turnId = `wake_${Date.now()}`
       bargedRef.current = false
+      // Record it in the session: the planner replays session messages, so a
+      // later "what did you just say?" knows. It is a note, not a turn.
+      void capri.call('session.note', { text: line, turnId }).catch(() => undefined)
       setEntries((prev) => [
         ...prev,
         { kind: 'message', id: `a_${turnId}`, turnId, role: 'assistant', text: line },
@@ -921,7 +986,12 @@ export default function App() {
           return
         }
         const hit = await capri.call<WakeResult>('voice.wake', { audio: audioUrl })
-        if (!hit.matched) return
+        if (!hit.matched) {
+          // A refusal with a reason was addressed to her and missed; a plain
+          // non-match was someone else's sentence and stays silent.
+          noteRejectedWake(hit.reason)
+          return
+        }
         if (await applyWakeIntent(hit.intent, pendingConfirm)) {
           // "yes" starts a turn; "stop" ends one. Either way the floor follows.
           setFloorAfterTurn(true)
@@ -946,7 +1016,7 @@ export default function App() {
         wakePending.current = false
       }
     },
-    [applyWakeIntent, closeFloor, openFloor, speakWakeReply],
+    [applyWakeIntent, closeFloor, noteRejectedWake, openFloor, speakWakeReply],
   )
 
   // `speaking` is true while the player still owes audio on her line, so its
@@ -1131,6 +1201,12 @@ export default function App() {
       alive = false
     }
   }, [status])
+
+  // The only screen that ever starts blank is a reloaded one.
+  useEffect(() => {
+    if (status !== 'online') return
+    void hydrateTranscript()
+  }, [hydrateTranscript, status])
 
   // WORK wants a wider window than the conversation. The shell remembers the
   // two layouts separately and restores this one on the way back.
@@ -1513,6 +1589,7 @@ export default function App() {
             <button
               className="qb-icon qb-wake"
               data-armed={wakeArmed}
+              data-heard={wakeHeard || undefined}
               title={
                 wakeArmed
                   ? 'Listening for “Capri” — click to stop'
@@ -1769,6 +1846,7 @@ export default function App() {
           <button
             className="eyes wake"
             data-armed={wakeArmed}
+            data-heard={wakeHeard || undefined}
             aria-pressed={wakeArmed}
             aria-label="Wake word"
             onClick={() => void capri.toggleWake()}

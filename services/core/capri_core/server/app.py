@@ -292,6 +292,7 @@ class CapriServer:
             "screen.act": self._screen_act,
             "session.info": self._session_info,
             "session.new": self._session_new,
+            "session.note": self._session_note,
             "tools.list": self._tools_list,
             "tools.stats": self._tools_stats,
             "tools.proposals": self._tools_proposals,
@@ -402,7 +403,12 @@ class CapriServer:
 
         client.authed = True
         if client.session is None:
-            client.session = Session.create(self.conn, paths.DEFAULT_SUBJECT)
+            # A reconnect is the same conversation. Picking the episode back up
+            # is what lets the panel rebuild its transcript from `session.info`
+            # on a reload, and what keeps the planner's history across one.
+            client.session = Session.resume(
+                self.conn, paths.DEFAULT_SUBJECT
+            ) or Session.create(self.conn, paths.DEFAULT_SUBJECT)
         session = client.session
         self.scheduler.touch()
         log.info("session %s open (episode %d)", session.id, session.episode_id)
@@ -440,6 +446,24 @@ class CapriServer:
             "turns": [t for t, task in session.turns.items() if not task.done()],
             "workspace": self.workspaces.current(),
         }
+
+    async def _session_note(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
+        """Record a line she said outside a turn, without starting one.
+
+        A bare wake gets a spoken acknowledgement, and the panel owns the audio.
+        Without this the daemon's own history would not know she said it: the
+        planner replays session messages, so "what did you just say?" had no
+        answer. It is a message, not a turn - no task, no planner, no tokens.
+        """
+        session = self._require_session(client)
+        text = " ".join(str(params.get("text") or "").split())
+        if not text:
+            raise RpcError("invalid_args", "text is required")
+        if len(text) > 500:
+            raise RpcError("invalid_args", "text too long")
+        turn_id = str(params.get("turnId") or "").strip() or None
+        recorded = session.add_note(text, turn_id)
+        return {"turnId": recorded, "recorded": True}
 
     async def _session_new(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
         """Start a fresh conversation: a new episode, no transcript carried over.

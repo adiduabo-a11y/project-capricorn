@@ -14,6 +14,7 @@ import shutil
 import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 from typing import Any
 
@@ -486,6 +487,68 @@ def test_abandon_and_restart(tmp: Path) -> None:
     check(again.recent(space.id)[0].id == task.id, "recent tasks survive a restart")
 
 
+def test_session_resume() -> None:
+    """A reconnect picks the conversation back up instead of starting blank."""
+    conn = open_shard()
+    first = Session.create(conn)
+    check(Session.resume(conn).episode_id == first.episode_id, "an open episode is resumed")
+
+    first.add_message("trn_1", "user", "hey capri")
+    first.add_note("Yeah? I'm here.", "wake_1")
+    first.close()
+    again = Session.resume(conn)
+    check(again is not None and again.episode_id == first.episode_id,
+          "a disconnected episode is resumed, not replaced")
+    check([row["content"] for row in again.recent_messages(5)] == ["hey capri", "Yeah? I'm here."],
+          "the transcript is still there for the panel to rebuild from")
+    row = conn.execute("SELECT ended_at FROM episodes WHERE id = ?", (first.episode_id,)).fetchone()
+    check(row["ended_at"] is None, "and it is open again, so retention leaves it alone")
+
+    newer = Session.create(conn)
+    check(Session.resume(conn).episode_id == newer.episode_id, "a new chat is what the next connect gets")
+    check(Session.resume(conn).recent_messages(5) == [], "which starts empty")
+
+
+def test_session_note() -> None:
+    """A spoken acknowledgement is conversation, not a turn."""
+    conn = open_shard()
+    session = Session.create(conn)
+    session.add_message("trn_1", "user", "hey capri")
+
+    turn = session.add_note("Yeah? I'm here.", "wake_1")
+    check(turn == "wake_1", "the shell's id is kept")
+    check(session.turns == {}, "a note does not start a turn")
+    rows = session.recent_messages(10)
+    check([row["role"] for row in rows] == ["user", "assistant"], "the note is an assistant line")
+    check(rows[-1]["content"] == "Yeah? I'm here.", "and it is what she said")
+
+    generated = session.add_note("Hm?")
+    check(generated.startswith("note_"), f"a note without an id gets one: {generated}")
+    check(session.turns == {}, "still no turn")
+
+
+async def test_session_note_rpc() -> None:
+    """The RPC writes through the same path the panel calls."""
+    from capri_core.server.app import CapriServer, RpcError
+
+    conn = open_shard()
+    server = CapriServer.__new__(CapriServer)
+    client = types.SimpleNamespace(session=Session.create(conn))
+
+    result = await server._session_note(client, {"text": "  Hm?  ", "turnId": "wake_9"})
+    check(result == {"turnId": "wake_9", "recorded": True}, f"the note is recorded: {result}")
+    rows = client.session.recent_messages(5)
+    check(rows[-1]["content"] == "Hm?", "the line is stored, whitespace collapsed")
+    check(client.session.turns == {}, "no turn is registered")
+
+    raised = ""
+    try:
+        await server._session_note(client, {"text": "   "})
+    except RpcError as exc:
+        raised = exc.code
+    check(raised == "invalid_args", f"an empty note is refused: {raised}")
+
+
 # --------------------------------------------------------------------------- main
 
 
@@ -501,6 +564,11 @@ async def main() -> int:
         test_titles_and_service(tmp)
         print("conversation")
         test_conversation_gate()
+        print("session note")
+        test_session_note()
+        await test_session_note_rpc()
+        print("session resume")
+        test_session_resume()
         print("summary")
         test_summary_and_observations(tmp)
         print("ceiling")

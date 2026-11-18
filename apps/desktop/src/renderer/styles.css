@@ -1664,6 +1664,26 @@ summary,
   }
 }
 
+/* A wake candidate the gate refused: warm, brief, and gone. Silence made a
+ * dropped "Capri" indistinguishable from being ignored. */
+.eyes.wake[data-heard] .wake-dot {
+  border-color: rgba(240, 176, 106, 0.92);
+  background: rgba(240, 176, 106, 0.92);
+  box-shadow: 0 0 6px rgba(240, 176, 106, 0.75);
+  animation: wake-heard 1.4s ease-out;
+}
+
+@keyframes wake-heard {
+  0% {
+    opacity: 1;
+    transform: scale(1.6);
+  }
+  100% {
+    opacity: 0.5;
+    transform: scale(1);
+  }
+}
+
 .screen-controls {
   display: flex;
   flex-direction: column;
