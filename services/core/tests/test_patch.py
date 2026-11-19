@@ -624,7 +624,8 @@ async def test_repeat_memory(tmp: Path, config: CapriConfig) -> None:
 
 
 async def main() -> int:
-    raw = Path(tempfile.mkdtemp(prefix="capri-patch-"))
+    # Resolve 8.3 short names (e.g. RUNNER~1 in Windows CI TEMP) to match pathsafe.resolve().
+    raw = Path(tempfile.mkdtemp(prefix="capri-patch-")).resolve()
     try:
         tmp = raw / "project"
         tmp.mkdir()

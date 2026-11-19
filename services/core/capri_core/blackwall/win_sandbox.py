@@ -18,14 +18,18 @@ caller's ordinary subprocess path rather than making the daemon unusable.
 from __future__ import annotations
 
 import ctypes
+import logging
 import msvcrt
 import os
 import subprocess
 import sys
+import threading
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
+
+log = logging.getLogger("capri.blackwall.win_sandbox")
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
@@ -55,6 +59,18 @@ TOKEN_ALL_ACCESS = 0x000F01FF
 DISABLE_MAX_PRIVILEGE = 0x00000001
 LUA_TOKEN = 0x00000004
 SE_PRIVILEGE_ENABLED = 0x00000002
+STATUS_DLL_INIT_FAILED = 0xC0000142
+
+# Try strongest token restriction first, stepping down only if the session's
+# WindowStation/Desktop rejects restricted-token DLL initialization.
+_TOKEN_MODES: tuple[int | None, ...] = (
+    DISABLE_MAX_PRIVILEGE | LUA_TOKEN,
+    DISABLE_MAX_PRIVILEGE,
+    None,
+)
+_TOKEN_LOCK = threading.Lock()
+_TOKEN_INDEX = 0
+_TOKEN_VERIFIED = False
 
 JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100
 JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
@@ -344,7 +360,7 @@ def _enable_impersonate(token: HANDLE) -> None:
     )
 
 
-def _restricted_token() -> tuple[int, bool]:
+def _restricted_token(flags: int | None = None) -> tuple[int, bool]:
     current = HANDLE()
     if not advapi32.OpenProcessToken(
         kernel32.GetCurrentProcess(), TOKEN_ALL_ACCESS, ctypes.byref(current)
@@ -352,11 +368,16 @@ def _restricted_token() -> tuple[int, bool]:
         return 0, False
     try:
         _enable_impersonate(current)
-        for flags in (DISABLE_MAX_PRIVILEGE | LUA_TOKEN, DISABLE_MAX_PRIVILEGE):
+        candidates = (
+            (flags,)
+            if flags is not None
+            else (DISABLE_MAX_PRIVILEGE | LUA_TOKEN, DISABLE_MAX_PRIVILEGE)
+        )
+        for candidate in candidates:
             restricted = HANDLE()
             if advapi32.CreateRestrictedToken(
                 current,
-                flags,
+                candidate,
                 0,
                 None,
                 0,
@@ -392,18 +413,17 @@ def _file(fd: int, mode: str) -> BinaryIO:
     return os.fdopen(fd, mode, buffering=0)
 
 
-def spawn(
+def _spawn_with_mode(
     command: list[str],
     *,
     cwd: Path,
     env: dict[str, str],
-    want_stdin: bool = False,
+    want_stdin: bool,
+    token_flags: int | None,
 ) -> SandboxProcess:
-    """Launch one contained child. Raises SandboxError if Windows refuses."""
-    if os.name != "nt":
-        raise SandboxError("win_sandbox is Windows-only")
-
-    token, has_token = _restricted_token()
+    token, has_token = (
+        _restricted_token(token_flags) if token_flags is not None else (0, False)
+    )
     job, has_job = _make_job()
     in_read = in_write = -1
     out_read = out_write = -1
@@ -567,16 +587,90 @@ def spawn(
             kernel32.CloseHandle(process_info.hThread)
 
 
-def run(
+def _probe_dll_init(process: SandboxProcess) -> bool:
+    """True when a newly launched child survives past early Windows DLL init."""
+    if not process.restricted:
+        return True
+    result = kernel32.WaitForSingleObject(HANDLE(process.handle), 200)
+    if result != WAIT_OBJECT_0:
+        return True
+    code = DWORD()
+    if not kernel32.GetExitCodeProcess(HANDLE(process.handle), ctypes.byref(code)):
+        return True
+    return int(code.value) != STATUS_DLL_INIT_FAILED
+
+
+def _advance_token_mode(failed_index: int) -> None:
+    global _TOKEN_INDEX, _TOKEN_VERIFIED
+    with _TOKEN_LOCK:
+        if _TOKEN_INDEX == failed_index and _TOKEN_INDEX + 1 < len(_TOKEN_MODES):
+            _TOKEN_INDEX += 1
+            _TOKEN_VERIFIED = False
+
+
+def spawn(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    want_stdin: bool = False,
+) -> SandboxProcess:
+    """Launch one contained child. Raises SandboxError if Windows refuses."""
+    if os.name != "nt":
+        raise SandboxError("win_sandbox is Windows-only")
+
+    global _TOKEN_INDEX, _TOKEN_VERIFIED
+    with _TOKEN_LOCK:
+        index = _TOKEN_INDEX
+        verified = _TOKEN_VERIFIED
+
+    if verified:
+        return _spawn_with_mode(
+            command,
+            cwd=cwd,
+            env=env,
+            want_stdin=want_stdin,
+            token_flags=_TOKEN_MODES[index],
+        )
+
+    for candidate_index in range(index, len(_TOKEN_MODES)):
+        process = _spawn_with_mode(
+            command,
+            cwd=cwd,
+            env=env,
+            want_stdin=want_stdin,
+            token_flags=_TOKEN_MODES[candidate_index],
+        )
+        if _probe_dll_init(process):
+            with _TOKEN_LOCK:
+                if _TOKEN_INDEX <= candidate_index:
+                    _TOKEN_INDEX = candidate_index
+                    _TOKEN_VERIFIED = True
+            return process
+        log.warning(
+            "restricted sandbox child exited 0x%x during DLL init (mode=%s); stepping down",
+            STATUS_DLL_INIT_FAILED,
+            _TOKEN_MODES[candidate_index],
+        )
+        process.close()
+        _advance_token_mode(candidate_index)
+
+    return _spawn_with_mode(
+        command,
+        cwd=cwd,
+        env=env,
+        want_stdin=want_stdin,
+        token_flags=None,
+    )
+
+
+def _run_once(
     command: list[str],
     *,
     cwd: Path,
     env: dict[str, str],
     timeout_s: float,
 ) -> tuple[int, str, str, bool, bool, bool]:
-    """Run one command to completion. Returns (code, out, err, timed_out, restricted, jobbed)."""
-    import threading
-
     process = spawn(command, cwd=cwd, env=env)
     output = bytearray()
     error = bytearray()
@@ -611,3 +705,27 @@ def run(
         process.restricted,
         process.jobbed,
     )
+
+
+def run(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout_s: float,
+) -> tuple[int, str, str, bool, bool, bool]:
+    """Run one command to completion. Returns (code, out, err, timed_out, restricted, jobbed)."""
+    for _ in range(len(_TOKEN_MODES)):
+        with _TOKEN_LOCK:
+            index = _TOKEN_INDEX
+        result = _run_once(command, cwd=cwd, env=env, timeout_s=timeout_s)
+        code, _out, _err, timed_out, restricted, _jobbed = result
+        if not timed_out and restricted and code == STATUS_DLL_INIT_FAILED:
+            log.warning(
+                "restricted sandbox child exited 0x%x; retrying with next containment mode",
+                STATUS_DLL_INIT_FAILED,
+            )
+            _advance_token_mode(index)
+            continue
+        return result
+    return _run_once(command, cwd=cwd, env=env, timeout_s=timeout_s)

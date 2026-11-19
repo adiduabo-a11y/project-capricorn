@@ -381,13 +381,19 @@ def test_drag_and_pixels(config: CapriConfig) -> None:
     check(input.events[-1] == ("drag", 10, 20, 200, 120, "left"), "drag reaches the injector")
     check(result["action"] == "drag", "drag result is reported")
 
-    from PIL import Image
-    import io
+    import struct
+    import zlib
+
+    def _chunk(tag: bytes, payload: bytes) -> bytes:
+        crc = zlib.crc32(tag + payload) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + tag + payload + struct.pack(">I", crc)
 
     def png(color: tuple[int, int, int]) -> bytes:
-        buffer = io.BytesIO()
-        Image.new("RGB", (20, 20), color).save(buffer, format="PNG")
-        return buffer.getvalue()
+        # Build a minimal valid 20x20 RGB PNG using stdlib so tests run even without Pillow.
+        row = b"\x00" + bytes(color) * 20
+        ihdr = struct.pack(">IIBBBBB", 20, 20, 8, 2, 0, 0, 0)
+        idat = zlib.compress(row * 20)
+        return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", idat) + _chunk(b"IEND", b"")
 
     check(pixel_diff.changed(png((0, 0, 0)), png((255, 255, 255))), "pixel diff sees a real change")
     check(not pixel_diff.changed(png((0, 0, 0)), png((0, 0, 0))), "pixel diff ignores identical images")

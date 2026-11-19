@@ -1137,10 +1137,16 @@ def test_piper_engine(config: CapriConfig, tmp: Path) -> None:
     engine = build_engine(config)
     check(isinstance(engine, PiperEngine), "piper is a real engine, not a stub")
     check(not engine.available(), "piper reports missing voice files")
-    check(
-        "Piper voice files missing" in engine.reason(),
-        f"piper names the missing files: {engine.reason()[:60]}",
-    )
+    if importlib.util.find_spec("piper") is None:
+        check(
+            "piper is not installed" in engine.reason(),
+            f"piper names the missing package: {engine.reason()[:60]}",
+        )
+    else:
+        check(
+            "Piper voice files missing" in engine.reason(),
+            f"piper names the missing files: {engine.reason()[:60]}",
+        )
 
 
 async def test_unavailable(config: CapriConfig, tmp: Path) -> None:
