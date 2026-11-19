@@ -4,6 +4,7 @@ import { CalibrateVoice } from './CalibrateVoice'
 import { InputDevicePanel } from './InputDevicePanel'
 import { McpPanel } from './McpPanel'
 import { MicRoutePanel } from './MicRoutePanel'
+import { NotesPanel } from './NotesPanel'
 import type { InputDeviceController } from './audio/useInputDevice'
 import type { MicRouteController } from './audio/useMicRoute'
 import { capri } from './bridge'
@@ -488,19 +489,9 @@ function BrainPanel({
       <details className="set-object brain-advanced">
         <summary>
           <span>Advanced</span>
-          <small>sampling and timeouts</small>
+          <small>output and timeouts</small>
         </summary>
         <div className="set-fields">
-          <Field
-            name="temperature"
-            path={['models', 'temperature']}
-            schema={prop('temperature')}
-            root={root}
-            config={config}
-            depth={1}
-            saving={saving}
-            onSave={onSave}
-          />
           <Field
             name="disable_thinking"
             path={['models', 'disable_thinking']}
@@ -653,6 +644,7 @@ export function SettingsPanel({
           onSave={save}
         />
       ) : null}
+      <NotesPanel online={online} open={open} />
       <McpPanel online={online} />
       <InputDevicePanel device={inputDevice} />
       <MicRoutePanel route={micRoute} />
@@ -671,7 +663,7 @@ export function SettingsPanel({
       {config && schema ? (
         <div className="set-body">
           {Object.entries(schema.properties ?? {})
-            .filter(([key]) => key !== 'models' && key !== 'mcp')
+            .filter(([key]) => key !== 'models' && key !== 'mcp' && key !== 'notes')
             .map(([key, child]) => (
               <Field
                 key={key}

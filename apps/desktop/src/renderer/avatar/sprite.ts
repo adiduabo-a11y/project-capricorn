@@ -23,6 +23,13 @@ import grinSheet from '@packs/sprites/capri-neon/sprites/grin.png'
 import danceSheet from '@packs/sprites/capri-neon/sprites/dance.png'
 import wakeSheet from '@packs/sprites/capri-neon/sprites/wake.png'
 import leaveSheet from '@packs/sprites/capri-neon/sprites/leave.png'
+import perchSheet from '@packs/sprites/capri-neon/sprites/perch.png'
+import perchTalkSheet from '@packs/sprites/capri-neon/sprites/perch_talk.png'
+import perchBlinkSheet from '@packs/sprites/capri-neon/sprites/perch_blink.png'
+import perchGlitchSheet from '@packs/sprites/capri-neon/sprites/perch_glitch.png'
+import perchMusicSheet from '@packs/sprites/capri-neon/sprites/perch_music.png'
+import perchArriveSheet from '@packs/sprites/capri-neon/sprites/perch_arrive.png'
+import perchLeaveSheet from '@packs/sprites/capri-neon/sprites/perch_leave.png'
 
 const SHEETS: Record<string, string> = {
   idle: idleSheet,
@@ -36,6 +43,13 @@ const SHEETS: Record<string, string> = {
   dance: danceSheet,
   wake: wakeSheet,
   leave: leaveSheet,
+  perch: perchSheet,
+  perch_talk: perchTalkSheet,
+  perch_blink: perchBlinkSheet,
+  perch_glitch: perchGlitchSheet,
+  perch_music: perchMusicSheet,
+  perch_arrive: perchArriveSheet,
+  perch_leave: perchLeaveSheet,
 }
 
 interface Clip {
@@ -116,6 +130,16 @@ export async function createSpriteCapri(pack: SpritePack): Promise<CapriFigure> 
   let activeClip = resolveClip(def.clip)
   let frameAt = 0
   let frameIndex = -1
+  // A held cell (the seated sleep) stops the clock instead of looping.
+  let frozen = false
+  // The clip's correction from the anchor, in canvas pixels. Zero for every
+  // clip cut around her feet; the perch strips are cut around her hip.
+  let shiftX = 0
+  let shiftY = 0
+  // Character size, relative to the pack's reference clips (the perch strips).
+  // The sheets were drawn at different sizes, so every clip carries its own.
+  let poseScale = 1
+  let facingSign = 1
   let blinkClock = 0
   let blinkLeft = 0
   let blinkAt = 0
@@ -152,6 +176,12 @@ export async function createSpriteCapri(pack: SpritePack): Promise<CapriFigure> 
     stateName = name
     def = pack.states[name]
     activeClip = resolveClip(def.clip)
+    const clipDef = pack.clips?.[def.clip ?? '']
+    shiftX = clipDef?.shift?.[0] ?? 0
+    shiftY = clipDef?.shift?.[1] ?? 0
+    poseScale = clipDef?.scale ?? 1
+    applyScale()
+    frozen = def.frame != null
     frameAt = 0
     frameIndex = -1
     blinkClock = 0
@@ -167,7 +197,12 @@ export async function createSpriteCapri(pack: SpritePack): Promise<CapriFigure> 
 
     // Swap the first frame now instead of waiting for the next ticker step.
     // A command like Dance or Sleep should look immediate on the desktop.
-    showFrame(0)
+    showFrame(frozen ? clampFrame(def.frame) : 0)
+  }
+
+  function clampFrame(index: number | undefined): number {
+    const picked = Number.isFinite(index) ? Number(index) : 0
+    return Math.min(Math.max(picked, 0), activeClip.frames.length - 1)
   }
 
   function setMouth(value: string): void {
@@ -175,26 +210,34 @@ export async function createSpriteCapri(pack: SpritePack): Promise<CapriFigure> 
     refreshMouth()
   }
 
+  function applyScale(): void {
+    body.scale.set(poseScale * facingSign, poseScale)
+    mouth.scale.set(poseScale * facingSign, poseScale)
+    blink.scale.set(poseScale * facingSign, poseScale)
+  }
+
   function setFacing(next: 'left' | 'right'): void {
-    const flip = next === 'left' ? -1 : 1
-    body.scale.x = flip
-    mouth.scale.x = flip
-    blink.scale.x = flip
+    facingSign = next === 'left' ? -1 : 1
+    applyScale()
   }
 
   function update(dtMs: number): void {
     const dt = Math.min(dtMs, 100) / 1000
     elapsed += dt
 
-    frameAt += dt
-    const step = 1 / Math.max(activeClip.fps, 1)
-    while (frameAt >= step) {
-      frameAt -= step
-      let next = frameIndex + 1
-      if (next >= activeClip.frames.length) next = activeClip.loop ? 0 : activeClip.frames.length - 1
-      showFrame(next)
+    if (!frozen) {
+      frameAt += dt
+      const step = 1 / Math.max(activeClip.fps, 1)
+      while (frameAt >= step) {
+        frameAt -= step
+        let next = frameIndex + 1
+        if (next >= activeClip.frames.length) {
+          next = activeClip.loop ? 0 : activeClip.frames.length - 1
+        }
+        showFrame(next)
+      }
+      if (frameIndex < 0) showFrame(0)
     }
-    if (frameIndex < 0) showFrame(0)
 
     // Standing clips get the artist's own blink strip laid over the loop.
     const every = def.blink ?? 0
@@ -219,10 +262,41 @@ export async function createSpriteCapri(pack: SpritePack): Promise<CapriFigure> 
 
     const motion = def.motion ?? 'bob'
     const lift = motion === 'sleep' ? 0.8 : 1.8
-    body.y = Math.sin(elapsed * (motion === 'sleep' ? 0.7 : 1.25)) * lift
+    body.x = shiftX
+    blink.x = shiftX
+    mouth.x = shiftX
+    body.y = Math.sin(elapsed * (motion === 'sleep' ? 0.7 : 1.25)) * lift + shiftY
     if (blink.visible) blink.y = body.y
     mouth.y = body.y
     refreshMouth()
+  }
+
+  /**
+   * The drawn art for the current pose, in stage pixels. The cell is mostly
+   * transparent padding — a 240 px cell around a 161 px figure — so the pet's
+   * clickable region is cut to the clip's trim box rather than the cell.
+   */
+  function inkRect(): { x: number; y: number; width: number; height: number } | null {
+    const texture = body.texture
+    if (!texture) return null
+    const [trimX, trimY, trimW, trimH] =
+      pack.clips?.[def.clip ?? '']?.trim ?? [0, 0, texture.width, texture.height]
+    // Cell-local corners with the anchor at bottom centre, then the sprite's
+    // own scale/flip, then the stage transform.
+    const left = -texture.width / 2
+    const top = -texture.height
+    const xs = [left + trimX, left + trimX + trimW].map(
+      (vx) => view.position.x + (body.x + vx * body.scale.x) * view.scale.x,
+    )
+    const ys = [top + trimY, top + trimY + trimH].map(
+      (vy) => view.position.y + (body.y + vy * body.scale.y) * view.scale.y,
+    )
+    return {
+      x: Math.min(xs[0], xs[1]),
+      y: Math.min(ys[0], ys[1]),
+      width: Math.abs(xs[1] - xs[0]),
+      height: Math.abs(ys[1] - ys[0]),
+    }
   }
 
   setState(stateName)
@@ -234,6 +308,7 @@ export async function createSpriteCapri(pack: SpritePack): Promise<CapriFigure> 
     setMouth,
     setFacing,
     update,
+    inkRect,
     get state() {
       return stateName
     },

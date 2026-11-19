@@ -42,6 +42,8 @@ from ..config import (
 from ..mcp import McpService, importing, same_row
 from ..memory import MemoryService
 from ..models import Router
+from ..notes import VaultError, VaultService
+from ..pathsafe import resolve as resolve_path_safe
 from ..rag import RagService
 from ..screen import ScreenService, observation_payload
 from ..store import db
@@ -194,6 +196,10 @@ class CapriServer:
             self.memory.embedder,
             workspace=self.workspace,
         )
+        # Tellings in flight: fire-and-forget broadcasts of the vault pass, so
+        # nothing here waits on a socket and an event is never lost to the GC.
+        self._notes_events: set[asyncio.Task[Any]] = set()
+        self.notes = VaultService(config, conn, self.rag, on_state=self._notes_state)
         # The project, if one was open when the daemon last stopped. Opening
         # one is a shell RPC; the model never gets this capability.
         self.workspaces = WorkspaceService(conn, config, busy=self._turns_busy)
@@ -267,6 +273,9 @@ class CapriServer:
             "task.recent": self._task_recent,
             "task.continue": self._task_continue,
             "task.abandon": self._task_abandon,
+            "notes.status": self._notes_status,
+            "notes.set": self._notes_set,
+            "notes.index": self._notes_index,
             "rag.ingest": self._rag_ingest,
             "rag.search": self._rag_search,
             "rag.collections": self._rag_collections,
@@ -315,12 +324,17 @@ class CapriServer:
         self.scheduler.start()
         if not self._fake_brain:
             self.companion.start()
+        # Her voice takes ~11 s to load (Pocket's base model plus her state).
+        # Start that now, on a worker thread: the socket serves immediately and
+        # her first reply after a restart does not open with that silence.
+        speech_warm = asyncio.create_task(self.voice.prewarm())
         try:
             async with serve(self._handle, host, port, max_size=16 * 1024 * 1024):
                 log.info("listening on ws://%s:%d", host, port)
                 print(f"[core] listening ws://{host}:{port}", flush=True)
                 await asyncio.Future()  # run until cancelled
         finally:
+            speech_warm.cancel()
             await self.companion.stop()
             await self.scheduler.stop()
 
@@ -598,6 +612,7 @@ class CapriServer:
         self.scheduler.config = updated
         self.memory.reconfigure(updated)
         self.rag.reconfigure(updated)
+        self.notes.reconfigure(updated)
         self.workspaces.reconfigure(updated)
         self.voice.config = updated
         self.companion.config = updated
@@ -978,6 +993,71 @@ class CapriServer:
         result = self.memory.maintain(protect_episode=session.episode_id)
         return result
 
+    # ------------------------------------------------------------------ notes
+
+    async def _notes_status(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
+        self._require_session(client)
+        return self.notes.status()
+
+    def _notes_state(self, state: dict[str, Any]) -> None:
+        """Every open panel hears how the vault pass is going, without polling.
+
+        The Settings panel asks `notes.status` while a pass runs, but the rest
+        of the app had no way to know a vault was being read. This is a push, so
+        the line appears in whatever panel is open and clears itself at the end.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # nothing is listening yet; there is no loop to send on
+            return
+        task = loop.create_task(self._broadcast_event(protocol.event("notes.index", **state)))
+        self._notes_events.add(task)
+        task.add_done_callback(self._notes_events.discard)
+
+    async def _notes_set(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
+        """Point her at a vault, or clear it. Saving starts an index pass."""
+        self._require_session(client)
+        raw = params.get("path")
+        if not isinstance(raw, str):
+            raise RpcError("invalid_args", "path is required; send an empty string to clear it")
+        text = raw.strip()
+        if text:
+            folder = Path(resolve_path_safe(os.path.expanduser(text)))
+            if not folder.is_dir():
+                raise RpcError("invalid_args", f"no folder at {folder}")
+            text = str(folder)
+        try:
+            updated = set_value(self.config, "notes.vault", text)
+        except (KeyError, ValueError) as exc:
+            raise RpcError("invalid_args", str(exc)) from exc
+        try:
+            save_config(updated)
+        except OSError as exc:
+            raise RpcError("internal", f"could not write config: {exc}") from exc
+        self.config = updated
+        self.notes.reconfigure(updated)
+        self.rag.reconfigure(updated)
+        if not text:
+            # Stop a pass that is still running, or it would write the folder it
+            # started on back into a collection this call is emptying.
+            await self.notes.cancel_index()
+            removed = self.notes.clear()
+            return {**self.notes.status(), "removed": removed}
+        try:
+            # The first pass runs in the background: a large vault would
+            # otherwise hold the reply - and the panel - for minutes. The reply
+            # carries `indexing`, and the panel polls until it is done.
+            return await self.notes.start_index()
+        except VaultError as exc:
+            raise RpcError("invalid_args", str(exc)) from exc
+
+    async def _notes_index(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
+        self._require_session(client)
+        try:
+            return await self.notes.index()
+        except VaultError as exc:
+            raise RpcError("invalid_args", str(exc)) from exc
+
     # ------------------------------------------------------------------ rag
 
     async def _rag_ingest(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
@@ -1034,11 +1114,18 @@ class CapriServer:
         if not text:
             raise RpcError("invalid_args", "text is required")
         turn_id = str(params.get("turnId") or f"voice_{uuid.uuid4().hex[:10]}")
+        # A turn's reply preempts whatever is speaking; a cue or an
+        # acknowledgement must not. The shell sends `preempt: false` for those,
+        # because one that lands between `agent.done` and the first segment used
+        # to cut the answer off mid-sentence.
+        preempt = bool(params.get("preempt", True))
         # Do not await the whole stream in the client's dispatcher: that would
         # queue a following voice.barge_in behind every sentence. The turn
         # loop calls VoiceService directly; this RPC path is for the shell and
         # needs to remain interruptible.
-        task = asyncio.create_task(self.voice.speak(turn_id, text, client.send))
+        task = asyncio.create_task(
+            self.voice.speak(turn_id, text, client.send, preempt=preempt)
+        )
         self._voice_tasks.add(task)
         task.add_done_callback(self._voice_done)
         return {"started": True, "turnId": turn_id}
@@ -1443,6 +1530,7 @@ class CapriServer:
             workspace=self.workspace,
             work=self._work_context(task, resume=resume),
             project=self.workspaces,
+            notes=self.notes,
             memory=self.memory,
             rag=self.rag,
             voice=self.voice,

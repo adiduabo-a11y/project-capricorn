@@ -98,6 +98,26 @@ console.log('segmenter')
 }
 
 {
+  // A short opening may be her name alone: the pause after it is not the end.
+  const segmenter = new WakeSegmenter({ silenceMs: 300, graceMs: 600 })
+  feed(segmenter, 400, 0.3)
+  const mid = feed(segmenter, 500, 0)
+  check(mid === null, 'a short opening keeps the utterance open past the base silence')
+  feed(segmenter, 600, 0.3)
+  const done = feed(segmenter, 1000, 0)
+  check(done !== null, 'the request that follows her name is still the same utterance')
+  check(seconds(done) >= 1.4, `name and request stayed together: ${seconds(done).toFixed(2)} s`)
+}
+
+{
+  // A full sentence is not made to wait for the grace.
+  const segmenter = new WakeSegmenter({ silenceMs: 300, graceMs: 600 })
+  feed(segmenter, 1600, 0.3)
+  const done = feed(segmenter, 400, 0)
+  check(done !== null, 'a full sentence ends at the base silence, not the grace')
+}
+
+{
   // Calibration raises the threshold in a noisy room; the gate has to obey it.
   const segmenter = new WakeSegmenter({ silenceMs: 700, thresholdRms: 0.4 })
   const opening = feed(segmenter, 800, 0.3)

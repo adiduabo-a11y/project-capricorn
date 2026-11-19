@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Callable
 from typing import Any
 
 from ..agent.types import Msg
@@ -72,6 +73,8 @@ class RagService:
         collection: str | None = None,
         prune: bool = True,
         turn_id: str | None = None,
+        suffixes: frozenset[str] | None = None,
+        progress: Callable[[int, int], None] | None = None,
     ) -> dict[str, Any]:
         name = collection or (self.config.rag.collections[0] if self.config.rag.collections else "default")
         report = await index.ingest(
@@ -85,6 +88,8 @@ class RagService:
             max_bytes=self.config.rag.max_doc_bytes,
             prune=prune,
             turn_id=turn_id,
+            suffixes=suffixes,
+            progress=progress,
         )
         result = report.as_dict()
         result["collections"] = index.collections(self.conn)
@@ -107,6 +112,7 @@ class RagService:
         *,
         k: int | None = None,
         collections: list[str] | None = None,
+        exclude: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         hits = await retrieval.search(
             self.conn,
@@ -114,6 +120,7 @@ class RagService:
             self.reranker,
             query,
             collections=collections,
+            exclude=exclude,
             top_k=self.config.rag.top_k,
             rerank_top_n=self.config.rag.rerank_top_n,
             budget_tokens=self.config.rag.context_budget_tokens,
@@ -121,8 +128,14 @@ class RagService:
         limit = max(1, min(k or self.config.rag.rerank_top_n, 50))
         return [hit.as_dict() for hit in hits[:limit]]
 
-    async def recall_block(self, query: str) -> tuple[str, list[dict[str, Any]]]:
-        """Return (data block, citations). Empty when nothing is indexed."""
+    async def recall_block(
+        self, query: str, *, exclude: list[str] | None = None
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Return (data block, citations). Empty when nothing is indexed.
+
+        ``exclude`` keeps a collection out of the general block on turns where it
+        is read on its own (the vault, whose notes get their own section).
+        """
         if index.count_docs(self.conn) == 0:
             return "", []
         if not (query or "").strip():
@@ -135,6 +148,7 @@ class RagService:
                 self.embedder,
                 self.reranker,
                 variant,
+                exclude=exclude,
                 top_k=self.config.rag.top_k,
                 rerank_top_n=self.config.rag.rerank_top_n,
                 budget_tokens=self.config.rag.context_budget_tokens,

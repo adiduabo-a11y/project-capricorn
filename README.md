@@ -72,10 +72,24 @@ idle-animates from a data-driven procedural pack.
 | Screen (UIA, marks, OCR, pixel verify, clipboard) | working on allowlisted apps |
 | Blackwall (dynamic tools, recipes, health) | working; suspended Job Object containment, warm workers, critic, unified diff, brokered network with per-host rules, quotas and secret substitution |
 
-Phase 4 latency: Kokoro’s configured voice measures ~1.2 s to its first audio
-segment on this CPU, so the <700 ms acceptance target is **not met on the
-default path**. The optional Piper path measured ~125 ms warm (first load
-~1.4 s): `CAPRI_VOICE__TTS=piper` with a voice in `~/.capri/models/piper/`.
+Phase 4 latency: the voice is Pocket. Loading it (her state plus the base model)
+takes ~14 s here, and starts in the background the moment the daemon is up: the
+socket accepts ~2 s after launch and answers RPCs while the load runs, so a
+restart spends that time before her first reply rather than inside it (~54 s on
+the very first run, while the weights download). Measured end to end over the
+RPC the shell uses, the first audio segment arrives 2.2 s after `voice.speak`
+for a 46-character sentence, and ~1.1 s for a short line at the engine itself
+(her DSP layers add ~0.07 s), so the <700 ms acceptance target is **not met on
+the default path**. A line asked for in the first few seconds still waits for
+the load to finish. Warm, it runs at a real-time factor of **~0.55** — 1.6 s of
+CPU for 3.1 s of speech, 5.8 s for an 11 s sentence — so each segment is ready
+in about half the time it takes to play. That is what long replies get from it: the queue (`voice.queue_depth`, 2
+segments deep) refills faster than playback drains it, so a long answer streams
+end to end without a gap in the middle; the price is about a second before her
+first word, not a stall later on. Kokoro stays selectable and runs nearer 1.0 (a
+second of CPU per second of speech); the optional Piper path measured ~125 ms
+warm (first load ~1.4 s): `CAPRI_VOICE__TTS=piper` with a voice in
+`~/.capri/models/piper/`.
 
 ## Requirements
 
@@ -113,8 +127,90 @@ cleanly when one is absent):
 
 ```powershell
 uv sync --package capri-core --extra kokoro --extra stt --extra screen --extra ocr
-# add --extra piper for the low-latency alternative voice
+# add --extra piper for the low-latency alternative voice, --extra pocket for
+# Pocket TTS (her voice state, no lexicon next to the engine)
 ```
+
+### Cloning a voice (Chatterbox)
+
+### Words the voice can say
+
+The pack's lexicon lists base words and only some inflections, and sherpa-onnx
+drops a word it cannot find without a sound: "expects" is simply not spoken, and
+a clause that loses a word sounds like a sentence that stopped halfway. About one
+word in twenty of an ordinary reply was going missing. On first use the engine
+writes `<capri home>/models/kokoro/lexicon-capri-merged-v2.txt`: the pack's file
+plus the regular forms it implies — plural, third person, past, gerund,
+possessive, `y` to `ies` — each built from the base word's own phonemes, with the
+ending picked by the base's last sound (`expect` \u2192 `expects`, `stop` \u2192
+`stopped`, `carry` \u2192 `carries`). Only spellings English writes go in: no
+`danceed`, no `carrys`, and a base that is itself an inflection (`building` from
+`build`) gets its plural but not `buildinging`. That is about 831k entries and
+33 MB, built once in ~5 s. sherpa's tokenizer charges about 0.7 s per 100k
+entries to read it, so the engine loads in ~7.5 s instead of ~3 s (it was ~10 s
+with the unpruned 1.16M-entry file); her voice is warmed at startup, so that
+happens behind the panel. Nothing is invented: a word that is neither listed
+nor regular (acronyms, jargon) is still skipped, and sherpa logs it. Dashes are
+spoken as commas for the same reason — a dash is not in the lexicon, and a
+clause split on a dropped one is what "cut off midway" sounds like.
+
+### Which engine says the words
+
+That word table is the Kokoro path's, and a merged lexicon cannot hold what it
+has never seen: proper nouns and jargon ("Kubernetes", "OAuth") are still
+skipped, silently. Pocket TTS — her own voice state,
+`~/.capri/models/pocket/capri_english.safetensors` — has no word table at all; it
+synthesizes from the text and its voice state, so nothing can be skipped, and the
+33 MB merge is never read. Measured on this CPU: ~14 s to load the model and her
+state (54 s on the very first run, while the weights download; the daemon now
+does that in the background as it starts, Phase 4 above), then ~2.2 s to a
+sentence's first audio segment and a real-time factor near 0.55. Kokoro is 8.1 s
+to the first line and 2.9 s per 3 s; Piper is 1.7 s and 0.3 s a line, but is a
+different voice. The
+state already sounds at her register: measured on the same passage it sits
+within 0.6 semitones of Kokoro's +2 output, so the engine does not add
+`voice.dsp.pitch` on top of it (that put her ~2.4 semitones high). The layered
+mix still applies downstream, after whichever engine spoke.
+
+```powershell
+uv sync --package capri-core --extra pocket   # pulls CPU torch
+```
+
+```yaml
+# ~/.capri/config.yaml
+voice:
+  tts: pocket
+```
+
+Then restart the core. `CAPRI_VOICE__TTS=pocket` does the same for one run, and
+`tts: kokoro` (or `piper`) switches back.
+
+Chatterbox can clone a voice from a few seconds of reference audio, but it
+cannot be installed into this project's environment: it pins `numpy<2` (the
+daemon needs `numpy>=2`) and `transformers==4.46.3`, which the `pocket` extra
+cannot share. So it gets a venv of its own, and the daemon starts that
+interpreter once and talks to it over stdio (`voice/clone_worker.py`):
+
+```powershell
+uv venv "$HOME\.capri\models\chatterbox\venv" --python 3.12
+uv pip install --python "$HOME\.capri\models\chatterbox\venv\Scripts\python.exe" chatterbox-tts
+```
+
+Then point the engine and the clip at it — Settings → Voice, or the config:
+
+```json
+"voice": { "tts": "chatterbox", "reference_clip": "C:/path/to/clip.wav" }
+```
+
+The reference wants **five seconds at minimum** — Turbo refuses anything shorter
+and the worker falls back to the base model below that — and the model's
+maintainer recommends **ten seconds**. 24 kHz mono WAV, one speaker, no music or
+background noise, speaking the way you want her to. The weights download on the
+first sentence (about 2 GB) and the model then stays loaded; on CPU a sentence
+takes seconds rather than milliseconds. `voice.chatterbox_python` points the
+engine at a different interpreter. Whatever `voice.dsp` says still applies on
+top (pitch +2 and the layers by default), so what you hear is the cloned timbre
+in her character rather than the raw recording.
 
 Say **"Capri"** and then the request — "Capri, open my notes" — to talk to her
 without a hotkey. The wake word runs on the same recogniser as push-to-talk, so
@@ -324,6 +420,56 @@ mcp:
 - Not yet: HTTP transport, resources/prompts/sampling, and per-tool tier
   overrides.
 
+## Obsidian notes
+
+**Settings → Notes** points Capri at an Obsidian vault and indexes it, so your own
+notes are part of what she knows. Three tools go with it: `note.search` finds the
+passage, `note.read` returns a note by its vault-relative path, and `note.write`
+creates, appends to or rewrites one — after the confirmation card, with the same
+reviewer that can wave a safe destructive call through, so the ordinary "add this
+to my inbox" does not need a click.
+
+Only markdown is indexed (`note.search` reads what the index has), under a
+`vault` collection: `.md` and `.markdown` outside Obsidian's own `.obsidian` and
+`.trash` folders, pruned on every pass, so a note deleted in Obsidian stops being
+recalled. The folder is a setting and never an argument — every path the tools take
+is resolved inside it, so `../` and absolute paths are refused, and `.obsidian` is
+not writable. Re-index from the panel after editing notes outside the app; it shows
+how many notes are in the folder and how many are indexed.
+
+Choosing the folder starts the first pass in the background: `notes.set` answers
+at once with `indexing: {running, done, total}` instead of holding the call until
+every note is read, and the panel polls `notes.status` while it runs
+("indexing 128 of 400 notes..."). One pass runs at a time, a second request waits
+for the first rather than racing it, and `notes.index` is still the on-demand
+refresh that returns the added/changed/removed report. Unsetting the vault stops
+a running pass before it forgets the collection.
+
+The pass is also pushed, not only polled. `notes.index` carries
+`{running, done, total, error}` — once when a pass starts, about once a second
+while it runs, and once when it stops — so any open panel can say what the core
+is doing. The app under the avatar shows a line under the composer: "reading your
+notes (128 of 400)..." while it runs, then "your notes are indexed (400 notes)"
+for a few seconds, or the error if the pass stopped on one. A panel that opens
+mid-pass asks `notes.status` once to catch up, then follows the events.
+
+With no vault chosen, the three note tools are left out of the prompt's tool
+index (271 chars, measured) and the `## Your notes` section with them: a
+capability she cannot use is budget spent for nothing. They stay registered, so a
+stray call still answers with "choose the folder in Settings -> Notes" rather
+than an unknown tool, and they appear in the index the moment a folder is set.
+
+The vault is her wiki, not just one more index. With `notes.recall` on — the
+default, and the "Read it every turn" switch in the panel — each turn starts with up
+to four of your notes that match the request, in their own "From your notes"
+section, labelled `[note:path]` by vault-relative path. That collection is left out
+of the general document block on the same turn, so a passage cannot arrive twice
+under two headings, and no query-rewrite call is spent on it: the vault is read on
+every turn, and paraphrasing the question for it does not pay for itself. The
+prompt tells her to answer from those notes and name them as `[[note name]]`, and to
+write anything durable back with `note.write` instead of only saying she will
+remember it. Switch it off and she only reads the vault when she searches it.
+
 ## Verify
 
 ```powershell
@@ -341,6 +487,11 @@ uv run python services/core/tests/ws_smoke.py     # daemon over the wire (fake b
 #   whatever was already open. Point both commands at a throwaway CAPRI_HOME
 #   to keep the smoke out of your shard (a home with no voice weights skips
 #   the speak/barge-in pair and says so).
+#   The scripted turn edits a fixture in the daemon's run directory, which is
+#   outside any workspace, so the approval card it raises does not depend on
+#   your allow_paths; the check also confirms the edit landed afterwards, and
+#   reads policy.confirm.destructive rather than assuming a card (a daemon set
+#   never to ask is expected to raise none).
 uv run python services/core/tests/test_voice.py   # speech, STT, barge-in, Piper/engine checks
 uv run python services/core/tests/test_screen.py  # UIA, marks/OCR, diff, redaction, tools
 uv run python services/core/tests/test_companion.py # ambient commentary cadence, privacy, voice

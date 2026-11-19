@@ -21,19 +21,26 @@
     "danger": "#e84246"
   },
   "clips": {
-    "idle": { "sheet": "idle", "count": 60, "fps": 24, "loop": true },
-    "idle_blink": { "sheet": "idle_blink", "count": 8, "fps": 24, "loop": false },
-    "idle_mouth": { "sheet": "idle_mouth", "count": 5, "fps": 12, "loop": false },
-    "glitch": { "sheet": "glitch", "count": 10, "fps": 15, "loop": true },
-    "think": { "sheet": "glitch", "count": 10, "fps": 6, "loop": true },
-    "work": { "sheet": "glitch", "count": 10, "fps": 12, "loop": true },
-    "sleep": { "sheet": "sleep", "count": 16, "fps": 6, "loop": true },
-    "walk": { "sheet": "walk", "count": 12, "fps": 12, "loop": true },
-    "dangle": { "sheet": "dangle", "count": 24, "fps": 10, "loop": true },
-    "grin": { "sheet": "grin", "count": 16, "fps": 8, "loop": false },
-    "dance": { "sheet": "dance", "count": 16, "fps": 16, "loop": true },
-    "wake": { "sheet": "wake", "count": 13, "fps": 15, "loop": false },
-    "leave": { "sheet": "leave", "count": 12, "fps": 15, "loop": false }
+    "idle": { "trim": [6, 22, 106, 343], "scale": 1.6, "sheet": "idle", "count": 60, "fps": 24, "loop": true },
+    "idle_blink": { "trim": [6, 31, 104, 333], "scale": 1.6, "sheet": "idle_blink", "count": 8, "fps": 24, "loop": false },
+    "idle_mouth": { "trim": [59, 118, 15, 12], "scale": 1.6, "sheet": "idle_mouth", "count": 5, "fps": 12, "loop": false },
+    "glitch": { "trim": [13, 0, 209, 384], "scale": 1.6, "sheet": "glitch", "count": 10, "fps": 15, "loop": true },
+    "think": { "trim": [13, 0, 209, 384], "scale": 1.6, "sheet": "glitch", "count": 10, "fps": 6, "loop": true },
+    "work": { "trim": [13, 0, 209, 384], "scale": 1.6, "sheet": "glitch", "count": 10, "fps": 12, "loop": true },
+    "sleep": { "trim": [5, 24, 235, 332], "scale": 1.08, "sheet": "sleep", "count": 16, "fps": 6, "loop": true },
+    "walk": { "trim": [49, 15, 161, 350], "scale": 1.6, "sheet": "walk", "count": 12, "fps": 12, "loop": true },
+    "dangle": { "trim": [17, 16, 210, 352], "scale": 1.6, "sheet": "dangle", "count": 24, "fps": 10, "loop": true },
+    "grin": { "trim": [33, 19, 177, 345], "scale": 1.6, "sheet": "grin", "count": 16, "fps": 8, "loop": false },
+    "dance": { "trim": [27, 14, 213, 357], "scale": 1.6, "sheet": "dance", "count": 16, "fps": 16, "loop": true },
+    "wake": { "trim": [8, 9, 232, 359], "scale": 1.6, "sheet": "wake", "count": 13, "fps": 15, "loop": false },
+    "leave": { "trim": [0, 17, 240, 352], "scale": 1.6, "sheet": "leave", "count": 12, "fps": 15, "loop": false },
+    "perch": { "trim": [7, 35, 184, 345], "sheet": "perch", "count": 60, "fps": 30, "loop": true, "shift": [-26, 228] },
+    "perch_talk": { "trim": [7, 35, 184, 345], "sheet": "perch_talk", "count": 60, "fps": 30, "loop": true, "shift": [-26, 228] },
+    "perch_blink": { "trim": [7, 38, 184, 342], "sheet": "perch_blink", "count": 8, "fps": 30, "loop": false, "shift": [-26, 228] },
+    "perch_glitch": { "trim": [8, 33, 268, 348], "sheet": "perch_glitch", "count": 10, "fps": 15, "loop": true, "shift": [-26, 228] },
+    "perch_music": { "trim": [13, 29, 178, 351], "sheet": "perch_music", "count": 60, "fps": 30, "loop": true, "shift": [-26, 228] },
+    "perch_arrive": { "trim": [10, 33, 273, 347], "sheet": "perch_arrive", "count": 14, "fps": 15, "loop": false, "shift": [-26, 228] },
+    "perch_leave": { "trim": [11, 33, 271, 344], "sheet": "perch_leave", "count": 12, "fps": 15, "loop": false, "shift": [-26, 228] }
   },
   "states": {
     "idle": {
@@ -137,6 +144,60 @@
       "clip": "leave",
       "blink": 0,
       "description": "Stepping out of frame."
+    },
+    "perched": {
+      "clip": "perch",
+      "blinkClip": "perch_blink",
+      "blink": 4.2,
+      "description": "Seated on a ledge, breathing on the perch loop."
+    },
+    "perched_listening": {
+      "clip": "perch",
+      "blinkClip": "perch_blink",
+      "blink": 5.5,
+      "fx": ["listening"],
+      "description": "Seated, and the microphone is hot."
+    },
+    "perched_thinking": {
+      "clip": "perch_glitch",
+      "blink": 0,
+      "fx": ["thinking"],
+      "description": "Seated while the planner works; her projection shimmers."
+    },
+    "perched_working": {
+      "clip": "perch_glitch",
+      "blink": 0,
+      "fx": ["working"],
+      "description": "Seated through a long tool run."
+    },
+    "perched_talking": {
+      "clip": "perch_talk",
+      "blink": 0,
+      "description": "Seated and speaking; the artist drew the mouth into this strip, so no viseme overlay is needed."
+    },
+    "perched_sleeping": {
+      "clip": "perch_blink",
+      "frame": 4,
+      "motion": "sleep",
+      "blink": 0,
+      "fx": ["sleeping"],
+      "description": "Seated and asleep on the held shut-eye cell, so the layout cannot blink."
+    },
+    "perched_dancing": {
+      "clip": "perch_music",
+      "blink": 0,
+      "fx": ["dancing"],
+      "description": "Seated victory shuffle."
+    },
+    "perched_arriving": {
+      "clip": "perch_arrive",
+      "blink": 0,
+      "description": "The ribbon landing, seated: the figure assembles and the sit-down reads as one motion."
+    },
+    "perched_leaving": {
+      "clip": "perch_leave",
+      "blink": 0,
+      "description": "Stepping off the ledge."
     }
   }
 }

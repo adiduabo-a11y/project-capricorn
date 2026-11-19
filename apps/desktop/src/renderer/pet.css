@@ -32,7 +32,62 @@
 
 .pet-actor .avatar {
   position: absolute;
-  inset: 0;
+  /* Standing art is drawn at a larger clip scale than the perch art, so the
+     canvas rises above the 200x300 box and reaches past its sides; CapriStage
+     keeps the feet line at the actor's bottom and the fit measured against the
+     box, so the extra room magnifies nothing. Seated art hangs below instead. */
+  top: -200px;
+  left: -80px;
+  width: 360px;
+  height: calc(100% + 380px);
+  /* The listening rim light is allowed to spill past the sprite box. */
+  overflow: visible;
+}
+
+/* The seated art hangs below the actor box, so the pointer surface has to as
+ * well: this strip is where her legs actually are. It is empty and click-through
+ * whenever she is standing, so nothing new swallows desktop clicks. */
+.pet-actor::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 0;
+  width: 100%;
+  height: 0;
+  pointer-events: none;
+}
+
+.pet-actor[data-perched='true']::after {
+  height: 180px;
+  pointer-events: auto;
+}
+
+/* Listening has no art of its own: the pack's listening clip is the idle strip,
+ * and a held frame reads as a stutter rather than attention. So a hot microphone
+ * shows as a rim light on the projection — the recording-indicator convention —
+ * with a slow breath so it cannot be mistaken for a tint. It works seated and
+ * standing, because it is keyed on the state, not on which strip is playing. */
+.pet-actor .avatar[data-state='listening'] canvas,
+.pet-actor .avatar[data-state='perched_listening'] canvas {
+  filter: drop-shadow(0 0 6px rgba(94, 240, 246, 0.62));
+  animation: pet-listening 2.6s ease-in-out infinite;
+}
+
+@keyframes pet-listening {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.84;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-actor .avatar[data-state='listening'] canvas,
+  .pet-actor .avatar[data-state='perched_listening'] canvas {
+    animation: none;
+  }
 }
 
 .pet-root[data-mode='drag'] {

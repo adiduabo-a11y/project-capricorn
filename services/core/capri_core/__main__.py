@@ -312,6 +312,7 @@ def main(argv: list[str] | None = None) -> int:
                     "thresholdRms": config.voice.wake.threshold_rms,
                     "minUtteranceMs": config.voice.wake.min_utterance_ms,
                     "silenceMs": config.voice.wake.silence_ms,
+                    "nameGraceMs": config.voice.wake.name_grace_ms,
                     "followUpMs": config.voice.wake.follow_up_ms,
                     "minConfidence": config.voice.wake.min_confidence,
                     "maxNoSpeechProb": config.voice.wake.max_no_speech_prob,

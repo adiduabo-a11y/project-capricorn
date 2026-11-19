@@ -19,6 +19,7 @@ from ..config import CapriConfig
 from ..models.vision import asks_to_look, vision_enabled
 from ..store import db
 from ..tools import review
+from ..tools.builtin.notes import NAMES as NOTE_TOOL_NAMES
 from ..tools.base import ScreenState, ToolContext, ToolResult
 from ..tools.policy import TIER_NAMES, Policy
 from ..tools.registry import Registry
@@ -31,6 +32,16 @@ log = logging.getLogger("capri.agent")
 _RESUME_NOTE = (
     "Continue this task from the record above. Pick up at the next unfinished "
     "step; do not repeat a call whose result is already recorded."
+)
+
+# Said when a reply promises the work instead of doing it. Twice is the limit:
+# after that, asking a third time only spends the budget on a model that will
+# not act.
+_MAX_NUDGES = 2
+_NUDGE = (
+    "[system] You said you would do that, but no tool ran. Do it now, in this "
+    "turn: choose a tool and act. If something is genuinely blocking you, say "
+    "exactly what it is and stop."
 )
 
 
@@ -166,6 +177,7 @@ class TurnRunner:
         workspace: str,
         work: prompt.WorkContext | None = None,
         project: Any = None,
+        notes: Any = None,
         memory: Any = None,
         rag: Any = None,
         voice: Any = None,
@@ -191,6 +203,7 @@ class TurnRunner:
         self.workspace = workspace
         self.work = work
         self.project = project
+        self.notes = notes
         self.memory = memory
         self.rag = rag
         self.voice = voice
@@ -334,20 +347,45 @@ class TurnRunner:
             except Exception:
                 log.exception("memory recall failed; continuing without it")
 
+        # The vault read as her wiki on this turn: its notes get their own
+        # section, and are kept out of the general document block, so a note
+        # cannot arrive twice under two headings.
+        wiki = self.notes is not None and self.notes.wants_recall()
         documents_block = ""
         if self.rag is not None:
             try:
-                documents_block, citations = await self.rag.recall_block(text)
+                documents_block, citations = await self.rag.recall_block(
+                    text, exclude=[self.notes.collection] if wiki else None
+                )
                 for citation in citations:
                     await self.emit(_event("rag.cited", turnId=turn_id, **citation))
             except Exception:
                 log.exception("rag recall failed; continuing without it")
 
-        messages = self._history(memory_block, documents_block, request=text)
+        note_ctx: prompt.NotesContext | None = None
+        if wiki:
+            try:
+                vault = self.notes.status()
+                note_ctx = prompt.NotesContext(
+                    path=str(vault.get("vault") or ""),
+                    count=int(vault.get("indexed") or 0),
+                )
+                vault_block, vault_citations = await self.notes.recall_block(text)
+                if vault_block:
+                    documents_block = (
+                        f"{vault_block}\n\n{documents_block}" if documents_block else vault_block
+                    )
+                for citation in vault_citations:
+                    await self.emit(_event("rag.cited", turnId=turn_id, **citation))
+            except Exception:
+                log.exception("vault recall failed; continuing without it")
+
+        messages = self._history(memory_block, documents_block, request=text, notes=note_ctx)
         specs = self.registry.specs()
         calls: dict[str, int] = {}
         seen = _Seen()
         stalled = 0
+        nudges = 0
         notes: list[str] = []
         wall_limit = self.config.agent.max_wall_clock_s
         compacted = False
@@ -394,7 +432,41 @@ class TurnRunner:
                 self.planner_failed = decision.failed
                 if decision.failed:
                     self.paused_reason = "planner failed"
-                return (decision.final or "Done."), notes
+                    return (decision.final or "Done."), notes
+                reply = (decision.final or "").strip()
+                # A model that narrates the work and stops ends the turn with
+                # the user waiting on something no tool was ever asked to do.
+                # It is asked again, twice at most; after that a third nudge
+                # only burns the budget.
+                if (
+                    nudges < _MAX_NUDGES
+                    and not prompt.looks_like_conversation(text)
+                    and prompt.announces_action(reply)
+                ):
+                    nudges += 1
+                    db.trace(
+                        self.conn,
+                        span="turn",
+                        turn_id=turn_id,
+                        workspace_id=self.workspace_id,
+                        task_id=self.task_id,
+                        name="turn.nudge",
+                        payload={"attempt": nudges, "said": reply[:300]},
+                    )
+                    if step == self.config.agent.max_steps:
+                        # No step left to act in: asking again would only run
+                        # out the loop, and the ceiling line would throw away
+                        # the reply the person is about to read. Keep her words
+                        # and say the true part after them.
+                        self.paused_reason = "step ceiling"
+                        return (
+                            f"{reply} (That was my last step, so nothing actually "
+                            "ran: tell me to keep going and I'll do it.)"
+                        ), notes
+                    messages.append(Msg("assistant", reply))
+                    messages.append(Msg("user", _NUDGE))
+                    continue
+                return (reply or "Done."), notes
 
             await self.emit(_event("agent.step", turnId=turn_id, step=step,
                                    thought=decision.thought, tool=decision.tool))
@@ -667,6 +739,7 @@ class TurnRunner:
             emit=self.emit,
             policy=self.policy,
             project=self.project,
+            notes=self.notes,
             reads=self._reads,
             workspace_id=self.workspace_id,
             task_id=self.task_id,
@@ -779,8 +852,16 @@ class TurnRunner:
         return dropped, saved
 
     def _history(
-        self, memories: str = "", documents: str = "", request: str = ""
+        self,
+        memories: str = "",
+        documents: str = "",
+        request: str = "",
+        notes: prompt.NotesContext | None = None,
     ) -> list[Msg]:
+        # A note tool with no vault behind it can only fail, so it is not
+        # advertised: the registry keeps it callable and the error says what to
+        # do, but the index is budget and this would be spent for nothing.
+        vault = str(getattr(self.config.notes, "vault", "") or "").strip()
         system = prompt.system_prompt(
             self.registry.specs(),
             self.config.agent.persona_pack,
@@ -788,11 +869,13 @@ class TurnRunner:
             documents,
             profile=self.config.policy.profile,
             work=self.work,
+            notes=notes,
             screen=self.look or self.screen_task,
             request=request,
             # What she is allowed to reach on this machine, so "open it" has an
             # answer either way instead of a guess and a refusal.
             apps=tuple(getattr(self.policy.cfg, "screen_allow_apps", ()) or ()),
+            hidden=() if vault else NOTE_TOOL_NAMES,
         )
         messages = [Msg("system", system)]
         budget = max(

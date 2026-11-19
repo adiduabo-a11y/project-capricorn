@@ -1,6 +1,6 @@
 {
   "name": "@capri/desktop",
-  "version": "0.5.10",
+  "version": "0.5.11",
   "private": true,
   "type": "module",
   "description": "Project Capricorn's projection layer: avatar, speech bubble, settings",
@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test:voice": "tsc src/renderer/audio/segmenter.ts src/renderer/audio/preroll.ts --outDir ../../.live/voice-segmenter --module commonjs --target es2022 --skipLibCheck && node scripts/voice-segmenter-check.cjs ../../.live/voice-segmenter",
     "test:worklet": "npm run build && node scripts/capture-worklet-check.cjs",
+    "trim": "node scripts/trim-sprites.mjs",
     "sidecar": "node scripts/build-sidecar.mjs",
     "dist": "npm run build && npm run sidecar && electron-builder --win nsis",
     "dist:dir": "npm run build && npm run sidecar && electron-builder --dir"

@@ -69,6 +69,8 @@ file cannot be walked to. If they mean a window of theirs, they will name it.
 - Small, narrow changes. Do not rewrite what you were not asked to rewrite.
 - Prove it with a tool. A claim about a file, a command or a test is only true
   after the call returns.
+- Never announce work instead of doing it. "I'll write it now" ends a turn with
+  nothing written; if it needs doing, do it in this turn.
 - Report the result, not the journey: what changed, what passed, what is still
   broken.
 - If the conversation needs nothing done, answer. Do not call a tool to look

@@ -12,6 +12,11 @@ import { rms } from './wav'
 export const SPEECH_RMS = 0.012
 /** Shortest voiced sound worth transcribing: filters clicks and coughs. */
 export const MIN_MS = 300
+/**
+ * Below this much voiced audio the utterance may be her name and nothing else,
+ * so a pause after it is not the end of the sentence.
+ */
+export const SHORT_MS = 1200
 /** Hard cap, so a noisy room cannot grow one buffer forever. */
 export const MAX_MS = 15_000
 /** Audio kept before the first voiced frame, so the first syllable survives. */
@@ -20,6 +25,11 @@ export const PREROLL_MS = 240
 export interface SegmenterOptions {
   /** Silence that ends an utterance, in milliseconds. */
   silenceMs: number
+  /**
+   * Extra silence allowed while too little has been said to be a sentence.
+   * "Capri" is short, and the request comes after the pause.
+   */
+  graceMs?: number
   /** RMS above which a frame counts as speech. Calibration writes this. */
   thresholdRms?: number
   /** Shortest voiced sound worth transcribing. Calibration writes this. */
@@ -28,6 +38,7 @@ export interface SegmenterOptions {
 
 export class WakeSegmenter {
   private readonly silenceMs: number
+  private readonly graceMs: number
   private readonly thresholdRms: number
   private readonly minMs: number
   private preroll: Float32Array[] = []
@@ -40,6 +51,7 @@ export class WakeSegmenter {
 
   constructor(options: SegmenterOptions) {
     this.silenceMs = options.silenceMs
+    this.graceMs = Math.max(0, options.graceMs ?? 0)
     this.thresholdRms = options.thresholdRms ?? SPEECH_RMS
     this.minMs = options.minMs ?? MIN_MS
   }
@@ -68,7 +80,10 @@ export class WakeSegmenter {
     } else {
       this.quietMs += frameMs
     }
-    if (this.quietMs < this.silenceMs && this.voicedMs < MAX_MS) return null
+    // A short opening may be her name on its own: give the request a moment to
+    // arrive instead of ending the utterance and losing it.
+    const limit = this.speechMs < SHORT_MS ? this.silenceMs + this.graceMs : this.silenceMs
+    if (this.quietMs < limit && this.voicedMs < MAX_MS) return null
     return this.take()
   }
 

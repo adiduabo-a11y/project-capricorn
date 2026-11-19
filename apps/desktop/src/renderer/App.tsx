@@ -268,6 +268,24 @@ function shortPath(path: string): string {
   return parts.slice(-2).join('/')
 }
 
+/** One line for a vault pass, for whichever panel is open to say it. */
+function notesLine(state: {
+  running: boolean
+  done: number
+  total: number
+  error: string
+}): string {
+  if (state.error) return `notes could not be read: ${state.error}`
+  if (state.running) {
+    return state.total > 0
+      ? `reading your notes (${state.done} of ${state.total})...`
+      : 'reading your notes...'
+  }
+  return state.total > 0
+    ? `your notes are indexed (${state.total} notes)`
+    : 'your notes are indexed'
+}
+
 export default function App() {
   const [uiMode, setUiModeState] = useState<UiMode>(readUiMode)
   const [bubbleSide, setBubbleSide] = useState<BubbleSide>('above')
@@ -340,8 +358,29 @@ export default function App() {
   const [floorAfterTurn, setFloorAfterTurn] = useState(false)
   // Her voice is queued or playing.
   const [speaking, setSpeaking] = useState(false)
+  // The same value for callbacks that must not be rebuilt when it changes.
+  const speakingRef = useRef(false)
+  speakingRef.current = speaking
   const [voiceNote, setVoiceNote] = useState('')
+  // The vault pass, as the core tells it (notes.index): a panel that is not the
+  // Notes one should still say she is reading the vault, and when she is done.
+  const [notesNote, setNotesNote] = useState('')
+  const notesNoteTimer = useRef<number | null>(null)
   const [muted, setMuted] = useState(false)
+
+  // A pass can start in another window, or outlive a reload: ask once when the
+  // core comes up, then let the notes.index events carry it.
+  useEffect(() => {
+    if (status !== 'online') return
+    void capri
+      .call<{ indexing: { running: boolean; done: number; total: number; error: string } }>(
+        'notes.status',
+      )
+      .then((state) => {
+        if (state.indexing?.running) setNotesNote(notesLine(state.indexing))
+      })
+      .catch(() => undefined)
+  }, [status])
 
   const activeTurn = useRef<string | null>(null)
   const logRef = useRef<HTMLDivElement | null>(null)
@@ -377,6 +416,8 @@ export default function App() {
   // "Capri" was said alone: the next utterance is the request.
   const wakePending = useRef(false)
   const wakeFollowUp = useRef<number | null>(null)
+  // Utterances are judged in order: a chain, not a race.
+  const wakeChain = useRef<Promise<void>>(Promise.resolve())
   // Her answer to a bare name: the listening window opens when the line has
   // finished playing, not when it was queued.
   const wakeReply = useRef<{ pending: boolean; started: boolean; fallback: number | null }>({
@@ -460,7 +501,7 @@ export default function App() {
   /**
    * A dropped candidate is not nothing. `voice.wake` reports the gate's reason
    * — the same one `voice.status` keeps as `lastRejection` — so a candidate
-   * that sounded like words but scored too low gets a quiet "Hm?" and the dot
+   * that sounded like words but scored too low gets a quiet "Yeah?" and the dot
    * flashes warm; a candidate the recogniser judged to be no speech at all only
    * flashes. Throttled, because the room talks to itself all day.
    */
@@ -478,10 +519,13 @@ export default function App() {
     // "No speech" means there was nothing to answer; only a candidate that
     // sounded like words gets a word back. A running turn keeps her quiet too.
     if (reason !== 'low-confidence') return
-    if (activeTurn.current || mutedRef.current) return
+    if (activeTurn.current || mutedRef.current || speakingRef.current) return
     if (voiceStatusRef.current?.available === false) return
     void capri
-      .call('voice.speak', { turnId: `cue_${Date.now()}`, text: 'Hm?' })
+      // A cue never preempts. `speaking` is still false between `agent.done`
+      // and the first segment, and a cue that arrives in that gap used to cut
+      // the answer off mid-sentence.
+      .call('voice.speak', { turnId: `cue_${Date.now()}`, text: 'Yeah?', preempt: false })
       .catch(() => undefined)
   }, [])
 
@@ -844,6 +888,22 @@ export default function App() {
         })
         break
       }
+      case 'notes.index': {
+        const pass = {
+          running: !!event.running,
+          done: Number(event.done ?? 0),
+          total: Number(event.total ?? 0),
+          error: String(event.error ?? ''),
+        }
+        setNotesNote(notesLine(pass))
+        if (notesNoteTimer.current !== null) window.clearTimeout(notesNoteTimer.current)
+        // While it runs the line stays; once it stops it is worth a look for a
+        // moment, then the panel goes back to the conversation.
+        notesNoteTimer.current = pass.running
+          ? null
+          : window.setTimeout(() => setNotesNote(''), pass.error ? 12000 : 6000)
+        break
+      }
       case 'memory.written': {
         const key = `mw_${event.id}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
         setToasts((prev) => [
@@ -1060,7 +1120,11 @@ export default function App() {
       // An engine that says it is available but never produces a segment is a
       // failure, not a long answer. The window opens rather than staying shut.
       ack.fallback = window.setTimeout(finishWakeReply, 2500)
-      void capri.call('voice.speak', { turnId, text: line }).catch(() => finishWakeReply())
+      // Never preempt: if a turn's reply is already speaking, the answer to
+      // her own name is not worth cutting it in half. The floor still opens.
+      void capri
+        .call('voice.speak', { turnId, text: line, preempt: false })
+        .catch(() => finishWakeReply())
     },
     [finishWakeReply, openFloor],
   )
@@ -1118,6 +1182,11 @@ export default function App() {
         // A bare "Capri": she answers it out loud, then holds the floor for
         // the sentence that follows. The utterance was her name and nothing
         // else, so it is never sent as a turn.
+        //
+        // The floor is armed here, not when that line finishes playing: the
+        // rest of the sentence can arrive while she is still saying "Yeah?",
+        // and it is the request, not a stray sentence from the room.
+        wakePending.current = true
         const reply = hit.reply?.trim() ?? ''
         if (reply) speakWakeReply(reply)
         else openFloor('Go ahead.')
@@ -1170,7 +1239,8 @@ export default function App() {
       return
     }
     const settings = {
-      silenceMs: info?.wake?.silenceMs ?? 700,
+      silenceMs: info?.wake?.silenceMs ?? 550,
+      graceMs: info?.wake?.nameGraceMs ?? 700,
       thresholdRms: info?.wake?.thresholdRms,
       minMs: info?.wake?.minUtteranceMs,
     }
@@ -1183,7 +1253,14 @@ export default function App() {
     }
     const monitor = new WakeMonitor({
       ...settings,
-      onUtterance: (audioUrl) => void handleWakeUtterance(audioUrl),
+      // One judgement at a time, in the order the microphone produced them. A
+      // second utterance used to be judged while the first was still being
+      // transcribed, so it could not yet see that her name had been heard.
+      onUtterance: (audioUrl) => {
+        wakeChain.current = wakeChain.current
+          .then(() => handleWakeUtterance(audioUrl))
+          .catch(() => undefined)
+      },
     })
     wakeRef.current = monitor
     setWakeArmed(false)
@@ -1220,6 +1297,13 @@ export default function App() {
   useEffect(() => {
     wakeRef.current?.setPaused(speaking || voiceState !== 'idle')
   }, [speaking, voiceState, wakeArmed])
+
+  // The pet is a separate window and the daemon emits no microphone state, so
+  // the panel is the only place that knows capture is hot. One boolean, no
+  // protocol change: it dies with the pet window like every other pet channel.
+  useEffect(() => {
+    capri.petListening(voiceState === 'listening' || wakeArmed || floorOpen)
+  }, [voiceState, wakeArmed, floorOpen])
 
   // Registered before ready(), so the shell's initial ui-mode/bubble-side
   // events cannot land before the listener exists.
@@ -1859,6 +1943,7 @@ export default function App() {
           </div>
 
           {voiceNote ? <p className="qb-note">{voiceNote}</p> : null}
+          {notesNote ? <p className="qb-note">{notesNote}</p> : null}
 
           <div className="qb-compose" data-voice={voiceState}>
             <button
@@ -2562,6 +2647,7 @@ export default function App() {
         </div>
 
         {voiceNote ? <p className="voice-note">{voiceNote}</p> : null}
+        {notesNote ? <p className="voice-note">{notesNote}</p> : null}
 
         {toasts.length > 0 ? (
           <div className="toasts">

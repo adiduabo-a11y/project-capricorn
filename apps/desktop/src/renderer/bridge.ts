@@ -213,6 +213,14 @@ export type CoreEvent =
   | { type: 'workspace.changed'; reason: string; workspace: WorkspaceInfo | null }
   | { type: 'task.changed'; reason: string; task: WorkTask | null }
   | { type: 'screen.changed'; screen: ScreenInfo }
+  | {
+      type: 'notes.index'
+      running: boolean
+      done: number
+      total: number
+      startedAt: number
+      error: string
+    }
   | ({
       type: 'agent.artifact'
       turnId: string
@@ -318,6 +326,8 @@ export interface VoiceStatus {
   wake?: {
     enabled: boolean
     silenceMs?: number
+    /** Extra silence allowed while an utterance is too short to be a sentence. */
+    nameGraceMs?: number
     followUpMs?: number
     /** RMS above which a frame counts as speech; set by calibration. */
     thresholdRms?: number
@@ -451,7 +461,7 @@ export interface CapriBridge {
   /** Open a file at a character offset (an editor line when one is available). */
   openFile(path: string, offset?: number): Promise<void>
   /** Native folder picker. Returns null when the user cancels. */
-  chooseFolder(): Promise<string | null>
+  chooseFolder(title?: string): Promise<string | null>
   /** WORK asks for a wider window; the shell remembers both layouts. */
   setWorkLayout(active: boolean): Promise<boolean>
   windowControl(action: WindowAction): Promise<void>
@@ -469,6 +479,9 @@ export interface CapriBridge {
   onPetCommand(handler: (command: string) => void): () => void
   onPetCue(handler: (cue: PetCue) => void): () => void
   onPetMouth(handler: (viseme: string | null) => void): () => void
+  /** Microphone is hot in the panel; the pet window has no other way to know. */
+  petListening(active: boolean): void
+  onPetListening(handler: (active: boolean) => void): () => void
   /** Hide/show reset: forget the cached cursor before the overlay is shown. */
   onPetReset(handler: () => void): () => void
   /** Panel surface: forward the speech viseme to the separate pet window. */

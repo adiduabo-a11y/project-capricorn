@@ -77,13 +77,9 @@ class ModelsCfg(_Base):
             "Use the same model for planning, replies, and background work."
         ),
     )
-    temperature: float = Field(
-        default=0.6,
-        ge=0.0,
-        le=2.0,
-        title="Temperature",
-        description="Default sampling temperature for chat and tool decisions.",
-    )
+    # No sampling knobs: the server that runs the model owns them. A
+    # temperature here was sent on every request, which split authority over
+    # sampling between the harness and the endpoint.
     # Constrained decoding. `json_schema` is the portable OpenAI-compatible
     # response_format; `grammar` is llama.cpp's GBNF fallback. `none` leaves
     # it to the prompt.
@@ -202,6 +198,15 @@ class RagCfg(_Base):
     max_doc_bytes: int = Field(default=2_000_000, ge=10_000)
 
 
+class NotesCfg(_Base):
+    # The person's Obsidian vault, as a folder. Empty means "not set up yet":
+    # the note tools say so rather than guessing a path, and nothing is indexed.
+    vault: str = ""
+    # Her wiki, not just a folder: with this on and a vault set, every turn
+    # starts with the notes that match the request.
+    recall: bool = True
+
+
 class BlendCfg(_Base):
     a: str = "af_bella"
 
@@ -262,9 +267,22 @@ class WakeCfg(_Base):
             "at all, above this probability."
         ),
     )
-    # Silence that ends a captured utterance: long enough not to cut a sentence
-    # in half, short enough that a question feels answered quickly.
-    silence_ms: int = Field(default=700, ge=200, le=3000)
+    # Silence that ends a captured utterance: short enough that the end of a
+    # sentence is noticed at once. A short opening is given the grace below, so
+    # "Capri" followed by a pause is not cut off from its request.
+    silence_ms: int = Field(default=550, ge=200, le=3000)
+    # Extra silence allowed when too little has been said for the utterance to
+    # be a sentence: it may be only her name, and the request is on its way.
+    name_grace_ms: int = Field(
+        default=700,
+        ge=0,
+        le=2000,
+        title="Name grace (ms)",
+        description=(
+            "Extra silence allowed after a very short utterance, so a pause "
+            "after “Capri” does not cut the request off from its name."
+        ),
+    )
     # `voice.calibrate` measures these two against the room and the voice; the
     # defaults are what a quiet desk and a close microphone need.
     threshold_rms: float = Field(
@@ -312,6 +330,13 @@ class VoiceCfg(_Base):
     # Only ever a clip the user has the rights to; `--voice-reference` renders
     # Capri's own from the synthetic Kokoro blend.
     reference_clip: str = ""
+    # Python that runs Chatterbox when it cannot live in this environment
+    # (it pins numpy<2). Empty means <capri home>/models/chatterbox/venv.
+    chatterbox_python: str = ""
+    # Where the clone runs: auto (a CUDA GPU if this torch build has one, else
+    # the CPU), cpu, or cuda. There is no GPU path for an AMD card on Windows
+    # with the pinned torch, so auto is the CPU there.
+    chatterbox_device: Literal["auto", "cpu", "cuda"] = "auto"
     # Pocket voice state. Empty means <capri home>/models/pocket/capri_english.safetensors.
     voice_file: str = ""
     # Piper .onnx voice. Empty means <capri home>/models/piper/en_US-lessac-medium.onnx.
@@ -546,6 +571,10 @@ class CapriConfig(_Base):
         default_factory=RagCfg,
         description="Document indexing, retrieval, and citation behavior.",
     )
+    notes: NotesCfg = Field(
+        default_factory=NotesCfg,
+        description="The Obsidian vault Capri reads and writes notes in.",
+    )
     voice: VoiceCfg = Field(
         default_factory=VoiceCfg,
         description="Text-to-speech, speech-to-text, and voice effects.",
@@ -674,11 +703,6 @@ def _migrate_model_config(data: dict[str, Any]) -> dict[str, Any]:
         if candidates:
             models["model"] = candidates[0]
 
-    if "temperature" not in models and isinstance(old_planner, dict):
-        temperature = old_planner.get("temperature")
-        if isinstance(temperature, (int, float)):
-            models["temperature"] = float(temperature)
-
     embed = models.get("embed")
     if isinstance(embed, dict):
         embed.pop("device", None)
@@ -704,6 +728,12 @@ def _drop_retired_config(data: dict[str, Any]) -> dict[str, Any]:
     """
     out = copy.deepcopy(data)
     out.pop("version", None)
+
+    models = out.get("models")
+    if isinstance(models, dict):
+        # Sampling belongs to the server. A saved temperature is dropped rather
+        # than carried into a schema that no longer has it.
+        models.pop("temperature", None)
 
     agent = out.get("agent")
     if isinstance(agent, dict):

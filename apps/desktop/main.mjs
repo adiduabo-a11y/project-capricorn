@@ -67,6 +67,10 @@ let nextId = 1
 let rendererReady = false
 let petReady = false
 let petMouth = null
+// The panel owns the microphone, so the pet can only learn this from here.
+let petListening = false
+// Last hit-test answer from the pet: true when the pointer is over her.
+let petPointerInteractive = false
 let agentState = 'idle'
 let quitting = false
 let tray = null
@@ -669,6 +673,7 @@ function sendPetSnapshot() {
     state: online ? agentState : 'sleeping',
   })
   target.send('capri:pet-mouth', petMouth)
+  target.send('capri:pet-listening', petListening)
 }
 
 function emitToRenderer(ev) {
@@ -730,6 +735,7 @@ async function captureFrame(name) {
     await new Promise((r) => setTimeout(r, 180))
     const image = await win.webContents.capturePage()
     writeFileSync(path.join(here, name), image.toPNG())
+    win.setBackgroundColor('#00000000')
     console.log(`[smoke] captured ${name}`)
   } catch (err) {
     console.log(`[smoke] capture skipped: ${err.message}`)
@@ -898,6 +904,221 @@ async function probePetStates() {
   }
 }
 
+/** Smoke: the microphone channel, end to end.
+ *
+ * The panel sends the flag through preload, the shell forwards it to the pet
+ * window, the pet renderer turns it into a state and a rim light, and a pet
+ * that reboots has to get it back from the snapshot. Each of those is asserted,
+ * because a payload that dies in the middle looks exactly like a quiet pet.
+ */
+async function probePetListening() {
+  const report = { ok: false }
+  try {
+    if (!win || win.isDestroyed() || !petWin || petWin.isDestroyed()) {
+      return { ok: false, reason: 'no windows' }
+    }
+    const settle = (ms = 260) => new Promise((r) => setTimeout(r, ms))
+    const command = (name) => petWin.webContents.send('capri:pet-command', name)
+    const read = () =>
+      petWin.webContents.executeJavaScript(`(() => {
+        const root = document.querySelector('.pet-root')
+        const avatar = document.querySelector('.pet-actor .avatar')
+        const canvas = avatar ? avatar.querySelector('canvas') : null
+        return {
+          state: (root && root.dataset.state) || '',
+          posed: (avatar && avatar.dataset.state) || '',
+          filter: canvas ? getComputedStyle(canvas).filter : '',
+        }
+      })()`)
+    // The panel side is the real bridge: preload method, IPC channel, shell.
+    const send = (on) =>
+      win.webContents.executeJavaScript(
+        `window.capri.petListening(${on ? 'true' : 'false'})`,
+      )
+    const until = async (want, tries = 14) => {
+      let seen = await read()
+      for (let i = 0; i < tries && seen.state !== want; i += 1) {
+        await settle(120)
+        seen = await read()
+      }
+      return seen
+    }
+
+    // A walk outranks listening in the state chain, so stop her first, and the
+    // run's own turn may still be speaking: talking outranks it too. The panel
+    // may also be reporting a hot microphone already, so start from off.
+    command('anchor')
+    let seen = await read()
+    for (let i = 0; i < 120 && seen.state === 'talking'; i += 1) {
+      await settle(125)
+      seen = await read()
+    }
+    await send(false)
+    const cold = await until('idle')
+
+    await send(true)
+    const hot = await until('listening')
+
+    // A pet that reboots has no memory of the channel: only the shell snapshot
+    // can bring the light back, so a missing snapshot fails here.
+    petWin.webContents.reload()
+    await settle(1200)
+    command('anchor')
+    const rebooted = await until('listening', 20)
+
+    await send(false)
+    const off = await until('idle')
+    command('wander')
+
+    Object.assign(report, { cold, hot, rebooted, off })
+    report.ok =
+      cold.state === 'idle' &&
+      !/drop-shadow/.test(cold.filter) &&
+      hot.state === 'listening' &&
+      hot.posed === 'listening' &&
+      /drop-shadow/.test(hot.filter) &&
+      rebooted.state === 'listening' &&
+      /drop-shadow/.test(rebooted.filter) &&
+      off.state === 'idle'
+  } catch (err) {
+    report.error = err.message
+  }
+  console.log(`[smoke] pet listening ${JSON.stringify(report)}`)
+  return report
+}
+
+/** Smoke: does the seated art actually appear?
+ *
+ * A perch is a seat, not an altitude: the art hangs below the actor box and the
+ * shift is what puts her hip on the ledge. That is only checkable by eye, so
+ * this drags her up, asserts the renderer chose a seated state, and leaves two
+ * frames (seated idle, seated sleep) for a human to look at.
+ */
+async function probePerchArt() {
+  const report = { ok: false }
+  try {
+    if (!petWin || petWin.isDestroyed()) return { ok: false, reason: 'no pet window' }
+    const settle = (ms = 300) => new Promise((r) => setTimeout(r, ms))
+    const command = (name) => petWin.webContents.send('capri:pet-command', name)
+    const read = () =>
+      petWin.webContents.executeJavaScript(`(() => {
+        const root = document.querySelector('.pet-root')
+        const avatar = document.querySelector('.pet-actor .avatar')
+        const actor = document.querySelector('.pet-actor')
+        const r = actor ? actor.getBoundingClientRect() : null
+        return {
+          state: (root && root.dataset.state) || '',
+          posed: (avatar && avatar.dataset.state) || '',
+          top: r ? Math.round(r.top) : 0,
+          transform: actor ? actor.style.transform : '',
+          innerHeight: window.innerHeight,
+        }
+      })()`)
+    const dragUp = (dy) =>
+      petWin.webContents.executeJavaScript(`(() => {
+        const actor = document.querySelector('.pet-actor')
+        if (!actor) return false
+        const r = actor.getBoundingClientRect()
+        const base = {
+          bubbles: true, cancelable: true, pointerId: 91, pointerType: 'mouse',
+          isPrimary: true, button: 0, clientX: r.left + 100, clientY: r.top + 150,
+        }
+        actor.dispatchEvent(new PointerEvent('pointerdown', { ...base, buttons: 1 }))
+        actor.dispatchEvent(new PointerEvent('pointermove', {
+          ...base, buttons: 1, clientY: r.top + 150 - ${dy},
+        }))
+        actor.dispatchEvent(new PointerEvent('pointerup', {
+          ...base, buttons: 0, clientY: r.top + 150 - ${dy},
+        }))
+        return true
+      })()`)
+
+    command('anchor')
+    await settle(400)
+    const before = await read()
+    await dragUp(300)
+    await settle(700)
+    const perched = await read()
+    await capturePetFrame('.smoke-perch.png')
+
+    // Her legs hang below the actor box. Both the window's hit test and the DOM
+    // have to reach them, or a real click goes to the desktop behind her.
+    const box = await petWin.webContents.executeJavaScript(`(() => {
+      const actor = document.querySelector('.pet-actor')
+      if (!actor) return null
+      const r = actor.getBoundingClientRect()
+      return { left: r.left, top: r.top, width: r.width, height: r.height }
+    })()`)
+    const legX = Math.round(box.left + box.width / 2)
+    const legY = Math.round(box.top + box.height + 120)
+    // Real input, not synthetic DOM events: sendInputEvent goes through the same
+    // hit test the operating system's click does, so it can tell whether the
+    // window is still click-through where her legs are.
+    const moveTo = async (x, y, want) => {
+      for (let i = 0; i < 8; i += 1) {
+        petWin.webContents.sendInputEvent({ type: 'mouseMove', x, y })
+        await settle(80)
+        if (petPointerInteractive === want) return true
+      }
+      return false
+    }
+    const legsReachable = await moveTo(legX, legY, true)
+    const perchedAttr = await petWin.webContents.executeJavaScript(
+      "document.querySelector('.pet-actor')?.dataset.perched || ''",
+    )
+    // Away from her the window has to go back to click-through, or the strip
+    // would eat desktop clicks.
+    const awayClear = await moveTo(12, 12, false)
+    const legTarget = await petWin.webContents.executeJavaScript(
+      `(() => {
+        const el = document.elementFromPoint(${legX}, ${legY})
+        return el ? String(el.className || el.tagName) : ''
+      })()`,
+    )
+    // Grab her by the legs and lift: the same gesture a person would make.
+    petWin.webContents.sendInputEvent({ type: 'mouseMove', x: legX, y: legY })
+    await settle(120)
+    petWin.webContents.sendInputEvent({
+      type: 'mouseDown', x: legX, y: legY, button: 'left', clickCount: 1,
+    })
+    await settle(120)
+    petWin.webContents.sendInputEvent({
+      type: 'mouseMove', x: legX, y: legY - 90, button: 'left',
+    })
+    await settle(160)
+    petWin.webContents.sendInputEvent({
+      type: 'mouseUp', x: legX, y: legY - 90, button: 'left', clickCount: 1,
+    })
+    await settle(500)
+    const lifted = await read()
+
+    command('sleep')
+    await settle(700)
+    const asleep = await read()
+    await capturePetFrame('.smoke-perch-sleep.png')
+
+    command('wake')
+    await settle(500)
+    command('wander')
+
+    Object.assign(report, { before, perched, legs: {
+      x: legX, y: legY, reachable: legsReachable, perchedAttr,
+      awayClear, target: legTarget, liftedTop: lifted.top,
+    }, asleep })
+    report.ok =
+      perched.posed.startsWith('perched') &&
+      asleep.posed === 'perched_sleeping' &&
+      legsReachable === true &&
+      awayClear === true &&
+      legTarget.includes('pet-actor') &&
+      lifted.top < perched.top - 10
+  } catch (err) {
+    report.error = err.message
+  }
+  console.log(`[smoke] perch art ${JSON.stringify(report)}`)
+  return report
+}
+
 async function probeMicRouteUi() {
   try {
     if (!win || win.isDestroyed()) return
@@ -988,6 +1209,158 @@ async function capturePetFrame(name) {
   }
 }
 
+/**
+ * Every pose at the pack's character scale: walk, the drag dangle, dance, the
+ * held sleep cell, the wake burst and the leave burst. Each shot records the
+ * actor and canvas rects so the capture can be checked for clipping at the
+ * canvas edge, and the visor size so the poses can be compared to the perch.
+ */
+async function probePoseScale() {
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms))
+  const readState = () =>
+    petWin.webContents.executeJavaScript(
+      "document.querySelector('.pet-root')?.dataset.state || ''",
+    )
+  const geometry = () =>
+    petWin.webContents.executeJavaScript(`(() => {
+      const actor = document.querySelector('.pet-actor')
+      const canvas = document.querySelector('.pet-actor .avatar canvas')
+      if (!actor || !canvas) return null
+      const a = actor.getBoundingClientRect()
+      const c = canvas.getBoundingClientRect()
+      return {
+        state: document.querySelector('.pet-root')?.dataset.state || '',
+        posed: document.querySelector('.pet-actor .avatar')?.dataset.state || '',
+        actor: [Math.round(a.left), Math.round(a.top), Math.round(a.width), Math.round(a.height)],
+        canvas: [Math.round(c.left), Math.round(c.top), Math.round(c.width), Math.round(c.height)],
+      }
+    })()`)
+  const command = (name) => petWin.webContents.send('capri:pet-command', name)
+  const waitState = async (name, timeout = 3000) => {
+    const deadline = Date.now() + timeout
+    while (Date.now() < deadline) {
+      if ((await readState()) === name) return true
+      await pause(60)
+    }
+    return false
+  }
+  // The reachable region has to follow the drawn art, not the actor box: a fixed
+  // box left a wide strip of desktop dead behind her hair.
+  const wideHits = []
+  const shoot = async (name, note) => {
+    const info = await geometry()
+    const hit = await petWin.webContents.executeJavaScript(
+      "document.querySelector('.pet-actor')?.dataset.hit ?? ''",
+    )
+    const width = Number(String(hit).split(',')[2])
+    if (!(width > 0) || width > 310) wideHits.push(`${name}:${hit || 'none'}`)
+    await capturePetFrame(`.smoke-pose-${name}.png`)
+    console.log(`[smoke] pose ${name} ${JSON.stringify({ ...info, hit, ...note })}`)
+  }
+
+  try {
+    if (!petWin || petWin.isDestroyed()) return { ok: false }
+
+    // The perch probe leaves her asleep on the ledge; a forced sleep keeps the
+    // wander loop from ever starting a walk, so wake her first.
+    command('wake')
+    await waitState('waking', 2000)
+    await pause(1200)
+    command('anchor')
+    await pause(250)
+    // She picks a target on her own clock, so nudge the wander loop until she
+    // is actually walking rather than trusting one command to land in time.
+    let walking = false
+    // Most of her moves are teleports or hops, so this waits out a few idle
+    // holds rather than assuming the first nudge produces a walk.
+    const walkDeadline = Date.now() + 20_000
+    while (!walking && Date.now() < walkDeadline) {
+      command('wander')
+      walking = await waitState('walking', 2500)
+    }
+    await pause(120)
+    await shoot('walk', { seen: walking })
+
+    // Drag art: hold her high on the body so the pointer is on the sprite, not
+    // the floor strip, and lift a little to arm the mode.
+    command('anchor')
+    await pause(250)
+    const g = await geometry()
+    const gripX = Math.round(g.actor[0] + g.actor[2] / 2)
+    const gripY = Math.round(g.actor[1] + g.actor[3] * 0.3)
+    petWin.webContents.sendInputEvent({ type: 'mouseMove', x: gripX, y: gripY })
+    await pause(120)
+    petWin.webContents.sendInputEvent({ type: 'mouseDown', x: gripX, y: gripY, button: 'left', clickCount: 1 })
+    await pause(150)
+    petWin.webContents.sendInputEvent({ type: 'mouseMove', x: gripX, y: gripY - 40, button: 'left' })
+    const dragging = await waitState('dragging', 2000)
+    await pause(150)
+    await shoot('drag', { seen: dragging })
+    petWin.webContents.sendInputEvent({ type: 'mouseUp', x: gripX, y: gripY - 40, button: 'left', clickCount: 1 })
+    await pause(500)
+
+    command('anchor')
+    await pause(200)
+    command('dance')
+    const dancing = await waitState('dancing', 3000)
+    await pause(250)
+    await shoot('dance', { seen: dancing })
+
+    command('sleep')
+    const sleeping = await waitState('sleeping', 3000)
+    await pause(350)
+    await shoot('sleep', { seen: sleeping })
+
+    command('wake')
+    const waking = await waitState('waking', 3000)
+    await pause(100)
+    await shoot('wake', { seen: waking })
+
+    // The leave burst is the widest art in the pack. The window also paints its
+    // own click burst and ribbon on top of it, and those reach across the whole
+    // screen, so hide every overlay in the pet root: what is left is the sprite
+    // canvas, which is what has to fit.
+    await pause(900)
+    const hideOverlays = () =>
+      petWin.webContents.executeJavaScript(`(() => {
+        const stray = document.querySelectorAll(
+          '.pet-root > *:not(.pet-actor), .teleport-burst, [class*="ribbon"], [class*="burst"]',
+        )
+        for (const node of stray) node.style.setProperty('visibility', 'hidden')
+        return stray.length
+      })()`)
+    command('teleport')
+    const leaving = await waitState('leaving', 3000)
+    const hidden = await hideOverlays()
+    await pause(50)
+    await shoot('leave', { seen: leaving })
+    console.log(`[smoke] leave overlays hidden: ${hidden}`)
+
+    await petWin.webContents.executeJavaScript(`(() => {
+      const root = document.querySelector('.pet-root')
+      if (!root) return
+      for (const child of root.children) child.style.removeProperty('visibility')
+    })()`)
+
+    await pause(1400)
+    command('anchor')
+    await pause(400)
+    // Walking is the one state she picks on her own dice, so it is reported but
+    // does not fail the run; the rest are driven by commands.
+    return {
+      ok: dragging && dancing && waking && leaving && wideHits.length === 0,
+      walking,
+      dragging,
+      dancing,
+      waking,
+      leaving,
+      wideHits,
+    }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+}
+
 async function waitForRenderer(probe, timeoutMs = 6000) {
   if (!win || win.isDestroyed()) return false
   const deadline = Date.now() + timeoutMs
@@ -1003,6 +1376,7 @@ let finishing = false
 
 /** ``app.exit`` skips ``before-quit``, so the sidecar is stopped here. */
 function finishSmoke(code) {
+  if (smokeTimer) clearTimeout(smokeTimer)
   stopSidecar()
   setTimeout(() => app.exit(code), 200)
 }
@@ -1031,6 +1405,24 @@ async function maybeFinishSmoke() {
   await captureFrame('.smoke.png')
   await capturePetFrame('.smoke-pet.png')
   await probePetStates()
+  const listening = await probePetListening()
+  if (!listening.ok) {
+    console.log('[smoke] pet listening failed')
+    finishSmoke(1)
+    return
+  }
+  const perch = await probePerchArt()
+  if (!perch.ok) {
+    console.log('[smoke] perch art failed')
+    finishSmoke(1)
+    return
+  }
+  const poses = await probePoseScale()
+  if (!poses.ok) {
+    console.log(`[smoke] pose scale failed ${JSON.stringify(poses)}`)
+    finishSmoke(1)
+    return
+  }
   await probeMicRouteUi()
   await probeBubble()
   console.log('[smoke] ok')
@@ -1471,10 +1863,10 @@ ipcMain.handle('capri:work-layout', async (event, active) => {
 })
 
 /** A folder picker for the work tab. The renderer gets a path, nothing else. */
-ipcMain.handle('capri:choose-folder', async (event) => {
+ipcMain.handle('capri:choose-folder', async (event, title) => {
   if (!win || win.isDestroyed() || event.sender !== win.webContents) return null
   const result = await dialog.showOpenDialog(win, {
-    title: 'Open a project',
+    title: typeof title === 'string' && title.trim() ? title.trim() : 'Open a project',
     properties: ['openDirectory'],
   })
   if (result.canceled || result.filePaths.length === 0) return null
@@ -1536,6 +1928,8 @@ ipcMain.on('capri:pet-ready', (event) => {
 
 ipcMain.on('capri:pet-pointer', (event, interactive) => {
   if (!petWin || petWin.isDestroyed() || event.sender !== petWin.webContents) return
+  petPointerInteractive = !!interactive
+  if (isSmoke) console.log(`[smoke] pet pointer ${petPointerInteractive}`)
   petWin.setIgnoreMouseEvents(!interactive, { forward: true })
 })
 
@@ -1561,6 +1955,14 @@ const PET_CUES = new Set([
   'settle',
   'dance',
 ])
+
+ipcMain.on('capri:pet-listening', (event, active) => {
+  if (!win || win.isDestroyed() || event.sender !== win.webContents) return
+  petListening = !!active
+  if (petWin && !petWin.isDestroyed() && petReady) {
+    petWin.webContents.send('capri:pet-listening', petListening)
+  }
+})
 
 ipcMain.on('capri:pet-cue', (event, cue) => {
   if (!win || win.isDestroyed() || event.sender !== win.webContents) return
@@ -1614,17 +2016,30 @@ ipcMain.on('capri:renderer-ready', (event) => {
   win.webContents.send('capri:bubble-side', bubbleSide)
   if (speechMuted) win.webContents.send('capri:audio-muted', true)
   if (uiMode === 'bubble') maybeShowBubble()
-  if (isSmoke) console.log('[smoke] renderer reported ready')
+  if (isSmoke) {
+    console.log('[smoke] renderer reported ready')
+    armSmokeTimeout(120000, 'the run to finish')
+  }
 })
 
 // --------------------------------------------------------------------------- bootstrap
 
-if (isSmoke) {
-  setTimeout(() => {
-    console.error('[smoke] timeout waiting for renderer')
+// The boot watchdog used to stay armed for the whole run, so a smoke that took
+// longer than 25 s to reach its probes was killed mid-check and reported the
+// wrong failure. It is now re-armed when the panel reports ready: boot gets 25 s,
+// the run as a whole gets its own budget.
+let smokeTimer = null
+
+function armSmokeTimeout(ms, what) {
+  if (!isSmoke) return
+  if (smokeTimer) clearTimeout(smokeTimer)
+  smokeTimer = setTimeout(() => {
+    console.error(`[smoke] timeout waiting for ${what}`)
     app.exit(1)
-  }, 25000)
+  }, ms)
 }
+
+armSmokeTimeout(25000, 'renderer')
 
 function configureAudioPermissions() {
   const trusted = (contents) => Boolean(win && !win.isDestroyed() && contents === win.webContents)

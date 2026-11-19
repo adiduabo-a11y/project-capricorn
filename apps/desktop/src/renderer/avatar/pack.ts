@@ -21,6 +21,8 @@ export interface StateDef {
   clip?: string
   blinkClip?: string
   mouthClip?: string
+  /** Hold this cell and stop the clock: a seated sleep must not blink. */
+  frame?: number
   description?: string
 }
 
@@ -44,6 +46,24 @@ export interface ClipDef {
   count: number
   fps: number
   loop?: boolean
+  /**
+   * Where the art sits relative to the anchor, in canvas pixels. Perch strips
+   * are cut around her hip rather than her feet, so they carry the correction
+   * the source project applies; every other clip leaves it at zero.
+   */
+  shift?: [number, number]
+  /**
+   * Telexel scale for the strip. The sheets were drawn at different character
+   * sizes; every clip carries the factor that puts it at the perch art's size,
+   * which is the pack's reference. Absent means 1.
+   */
+  scale?: number
+  /**
+   * The art's bounding box inside the cell, as [x, y, width, height] in sheet
+   * pixels. Union over the clip's frames; drives the pet's clickable region so
+   * the window stops swallowing desktop clicks in the transparent corners.
+   */
+  trim?: [number, number, number, number]
 }
 
 export interface SpritePack {

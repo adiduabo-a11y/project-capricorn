@@ -405,6 +405,23 @@ Measured here: 2.0 s of speech in 1.2 s warm, 5.4 s in 4.6 s — about 1.2x
 realtime. Fine for conversation, **not** the < 700 ms first-word budget; Kokoro
 remains the low-latency path.
 
+Warm-up at startup: `PocketEngine.load()` and `VoiceService.prewarm()` run from
+`CapriServer.run`, on a worker thread, so the daemon's socket is free while the
+model loads. Measured by starting the daemon in a throwaway home: listening at
+2.03 s, hello at 2.17 s, a ping during the load answered in 0 ms, one model
+load logged (not two), `pocket warm in 13686 ms`, and the first audio segment
+15.8 s when asked during the load versus 2.2 s for a 46-character sentence
+asked after it. A lock in `PocketEngine._load` is what keeps the startup warm
+and an early reply from loading the model twice.
+
+Pitch: the state already carries her register, so the engine does not apply
+`voice.dsp.pitch` on top. On an eight-sentence passage (f0 from a per-frame
+cepstrum median) Kokoro dry read 199.9 Hz, Kokoro with its +2 lift 222.2 Hz, and
+Pocket dry 229.6 Hz — within 0.6 semitones of the lifted Kokoro voice, and about
+2.4 semitones above it when the +2 shift was applied. Duration is unchanged
+either way; Pocket is ~1.5x slower than Kokoro, which runs at tempo
+1.1 x speed / lift.
+
 `~/.capri/config.yaml` now selects Kokoro's `capri` style row (below), so Pocket
 is the alternative: `CAPRI_VOICE__TTS=pocket` for a run.
 

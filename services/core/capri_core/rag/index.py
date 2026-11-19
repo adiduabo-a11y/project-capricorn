@@ -14,6 +14,7 @@ import logging
 import os
 import sqlite3
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -66,11 +67,25 @@ def resolve(raw: str, workspace: str | None) -> Path:
     return path.resolve()
 
 
-def walk(paths: list[str], workspace: str | None) -> tuple[list[Path], list[Path], list[str]]:
-    """Return (files, roots, errors). Roots are directories that were ingested."""
+def walk(
+    paths: list[str],
+    workspace: str | None,
+    suffixes: frozenset[str] | None = None,
+) -> tuple[list[Path], list[Path], list[str]]:
+    """Return (files, roots, errors). Roots are directories that were ingested.
+
+    ``suffixes`` narrows what counts as a document. A folder ingest otherwise
+    takes every supported type, which is right for a project and wrong for an
+    Obsidian vault, where the notes are the markdown and the rest is not hers.
+    """
     files: list[Path] = []
     roots: list[Path] = []
     errors: list[str] = []
+
+    def wanted(candidate: Path) -> bool:
+        if not is_supported(candidate):
+            return False
+        return suffixes is None or candidate.suffix.lower() in suffixes
 
     for raw in paths:
         path = resolve(raw, workspace)
@@ -78,7 +93,7 @@ def walk(paths: list[str], workspace: str | None) -> tuple[list[Path], list[Path
             errors.append(f"{raw}: no such path")
             continue
         if path.is_file():
-            if is_supported(path):
+            if wanted(path):
                 files.append(path)
             else:
                 errors.append(f"{raw}: unsupported file type {path.suffix or '(none)'}")
@@ -93,7 +108,7 @@ def walk(paths: list[str], workspace: str | None) -> tuple[list[Path], list[Path
             )
             for name in sorted(filenames):
                 candidate = Path(dirpath) / name
-                if is_supported(candidate):
+                if wanted(candidate):
                     files.append(candidate)
 
     unique = list(dict.fromkeys(files))
@@ -255,15 +270,25 @@ async def ingest(
     max_bytes: int = 2_000_000,
     prune: bool = False,
     turn_id: str | None = None,
+    suffixes: frozenset[str] | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> IngestReport:
     # Walking the tree and reading files is disk-bound; a large ingest must not
     # freeze audio, events or pending confirmations while it runs.
-    files, roots, errors = await asyncio.to_thread(walk, paths, workspace)
+    files, roots, errors = await asyncio.to_thread(walk, paths, workspace, suffixes)
     report = IngestReport(collection=collection, errors=errors)
     seen: set[str] = set()
     stamp = int(time.time() * 1000)
+    total = len(files)
 
-    for path in files:
+    def step(done: int) -> None:
+        """How far a pass has got, for a caller that reports it to a person."""
+        if progress is not None:
+            progress(done, total)
+
+    step(0)
+
+    for position, path in enumerate(files, start=1):
         prepared = await asyncio.to_thread(
             _prepare,
             conn,
@@ -278,9 +303,11 @@ async def ingest(
         seen.add(prepared.key)
         if prepared.error:
             report.errors.append(prepared.error)
+            step(position)
             continue
         if prepared.unchanged:
             report.unchanged += 1
+            step(position)
             continue
 
         vectors = (
@@ -295,6 +322,7 @@ async def ingest(
         report.updated += 0 if added else 1
         report.chunks += chunks
         report.files.append(prepared.key)
+        step(position)
 
     if prune and roots:
         report.removed = await asyncio.to_thread(

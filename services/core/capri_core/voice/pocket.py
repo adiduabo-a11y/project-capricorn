@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import struct
+import threading
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -84,6 +85,9 @@ class PocketEngine:
         self._model: Any = None
         self._state: Any = None
         self._error: str | None = None
+        # Startup warms this while a reply may already be asking for it: one
+        # load, and a second caller waits for it rather than loading again.
+        self._lock = threading.Lock()
 
     def reason(self) -> str:
         if self._error:
@@ -103,7 +107,19 @@ class PocketEngine:
     def voices(self) -> list[str]:
         return [self.voice_file.stem] if self.available() else []
 
+    def load(self) -> None:
+        """Load the base model and her state without saying anything.
+
+        ~11 s of weights on this CPU. Paid at daemon startup it is invisible;
+        paid inside her first reply it is a silence the user hears.
+        """
+        self._load()
+
     def _load(self) -> tuple[Any, Any]:
+        with self._lock:
+            return self._open()
+
+    def _open(self) -> tuple[Any, Any]:
         if self._model is None:
             reason = self.reason()
             if reason:
@@ -142,7 +158,12 @@ class PocketEngine:
         samples = np.asarray(audio, dtype=np.float32).reshape(-1)
         if samples.size == 0:
             raise TtsUnavailable("Pocket returned no audio")
-        return Audio(np.ascontiguousarray(_levelled(samples)), self.sample_rate)
+        # No pitch shift here: the state already carries her register. Measured
+        # against the Kokoro path on the same passage, this take sits within 0.6
+        # semitones of Kokoro's +2 output, so dsp.pitch would put her ~2.4
+        # semitones above it. The layers downstream still apply.
+        out = _levelled(samples)
+        return Audio(np.ascontiguousarray(out, dtype=np.float32), self.sample_rate)
 
 
 def _levelled(samples: np.ndarray) -> np.ndarray:

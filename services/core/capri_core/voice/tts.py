@@ -23,6 +23,7 @@ import numpy as np
 from .. import paths
 from ..config import CapriConfig
 from . import dsp
+from . import lexicon
 
 log = logging.getLogger("capri.voice.tts")
 
@@ -106,6 +107,19 @@ class KokoroEngine:
     @property
     def lexicon_path(self) -> Path:
         return self.directory / KOKORO_LEXICON
+
+    @property
+    def speech_lexicon_path(self) -> Path:
+        """What the engine reads: the pack's lexicon plus the forms it omits.
+
+        The pack lists base words and few inflections, and sherpa drops a word
+        it cannot find without saying anything - which is a sentence that skips
+        a word. The merged file adds the regular forms once, and is reused.
+        """
+        source = self.lexicon_path
+        if not source.is_file():
+            return source
+        return lexicon.merged_lexicon(source)
 
     def missing_files(self) -> list[Path]:
         return [path for path in (self.model_path, self.voices_path) if not path.is_file()]
@@ -195,7 +209,7 @@ class KokoroEngine:
                 model=str(self.model_path),
                 voices=str(self.sherpa_voices_path),
                 tokens=str(self.tokens_path),
-                lexicon=str(self.lexicon_path),
+                lexicon=str(self.speech_lexicon_path),
             )
             model = sherpa_onnx.OfflineTtsModelConfig(
                 kokoro=kokoro,

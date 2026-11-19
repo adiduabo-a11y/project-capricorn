@@ -15,11 +15,13 @@ import { WakeSegmenter } from './segmenter'
 import { TARGET_RATE, resample, wavBase64 } from './wav'
 
 /** Everything that shapes the gate, as opposed to what it does with a hit. */
-export type WakeSettings = Pick<WakeOptions, 'silenceMs' | 'thresholdRms' | 'minMs'>
+export type WakeSettings = Pick<WakeOptions, 'silenceMs' | 'graceMs' | 'thresholdRms' | 'minMs'>
 
 export interface WakeOptions {
   /** Silence that ends an utterance, in milliseconds. */
   silenceMs: number
+  /** Extra silence allowed when the utterance is too short to be a sentence. */
+  graceMs?: number
   /** RMS above which a frame counts as speech; calibrated. */
   thresholdRms?: number
   /** Shortest voiced sound worth transcribing; calibrated. */
@@ -40,6 +42,7 @@ export class WakeMonitor {
   matches(settings: WakeSettings): boolean {
     return (
       this.options.silenceMs === settings.silenceMs &&
+      this.options.graceMs === settings.graceMs &&
       this.options.thresholdRms === settings.thresholdRms &&
       this.options.minMs === settings.minMs
     )

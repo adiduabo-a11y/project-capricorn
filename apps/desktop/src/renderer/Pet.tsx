@@ -8,6 +8,11 @@ import './pet.css'
 
 const PET_W = 200
 const PET_H = 300
+// The seated art hangs 176 CSS px below her feet line (a 228 canvas px clip
+// shift at the stage's 0.78 scale). The canvas grows by this much to draw it.
+const PERCH_ROOM = 180
+// The pose gate: the room above the taskbar she needs for a seat to read as one.
+const PERCH_GATE = 190
 // Travel speed is per trip, not a constant: a fixed 64 px/s walk is the least
 // alive thing a character can do.
 const SPEED = 64
@@ -28,9 +33,19 @@ const WANDER_KEY = 'capri.pet.wander'
 const ANCHOR_KEY = 'capri.pet.anchor'
 const TELEPORT_CHANCE = 0.3
 
-// The sprite occupies the middle of the 200 px host; the transparent edges
-// stay click-through so desktop icons under her feet remain usable.
+// The seated clips are the pack's reference size, so they still fill the actor
+// box: the hit region there is the box itself.
 const HIT = { left: 30, top: 4, width: 140, height: 294 }
+// Standing clips carry a clip scale to match the perch art, so she is drawn
+// above and past the sides of the box. `onInk` reports the art's real bounds
+// every frame and that is what the window follows; these two boxes are only the
+// fallback for the frames before the stage has drawn her.
+const SPRITE_RISE = 160
+const HIT_STANDING = { left: -70, top: -SPRITE_RISE, width: 340, height: 294 + SPRITE_RISE }
+// Canvas room for that art, in CSS px: CapriStage fits the pack canvas to the
+// 200x300 box, so these margins add drawing space, not magnification.
+const STAGE_RISE = 200
+const STAGE_SIDE = 80
 
 type Mode = 'idle' | 'walk' | 'drag' | 'fall'
 type Reaction = 'arriving' | 'leaving' | 'clicked' | 'dancing' | 'waking' | 'annoyed' | null
@@ -87,6 +102,36 @@ function moodFor(state: AgentState): string {
 }
 
 /**
+ * The same mood, sitting down. Standing art on a ledge is what made a perch look
+ * like the floor; every ambient state has a seated counterpart in the pack.
+ */
+function perchedState(state: string): string {
+  switch (state) {
+    case 'thinking':
+      return 'perched_thinking'
+    case 'working':
+      return 'perched_working'
+    case 'talking':
+      return 'perched_talking'
+    case 'sleeping':
+      return 'perched_sleeping'
+    case 'listening':
+      return 'perched_listening'
+    case 'dancing':
+      return 'perched_dancing'
+    case 'arriving':
+      return 'perched_arriving'
+    case 'leaving':
+      return 'perched_leaving'
+    case 'annoyed':
+    case 'error':
+      return 'perched_thinking' // her glitch, seated
+    default:
+      return 'perched'
+  }
+}
+
+/**
  * The desktop pet is its own transparent, screen-sized window. She walks a
  * floor line, glitch-teleports across it, can be picked up and tossed, and
  * turns back into chrome for a click. Only the sprite rectangle catches the
@@ -100,6 +145,11 @@ export function Pet() {
   const [facing, setFacing] = useState<'left' | 'right'>('right')
   const [agent, setAgent] = useState('idle')
   const [mouth, setMouth] = useState<string | null>(null)
+  // A seat, not an altitude: only the pose gate flips this, so it can be used in
+  // render without costing a state update on every frame.
+  const [perched, setPerched] = useState(false)
+  // The microphone is hot in the panel, which is a different process.
+  const [listening, setListening] = useState(false)
   const [online, setOnline] = useState(true)
   const [wander, setWander] = useState(true)
   const [anchored, setAnchored] = useState(() => {
@@ -134,6 +184,7 @@ export function Pet() {
   const anchoredRef = useRef(anchored)
   const forcedSleepRef = useRef(false)
   const agentRef = useRef('idle')
+  const perchedRef = useRef(false)
   const onlineRef = useRef(true)
   const mouthRef = useRef<string | null>(null)
   const interactiveRef = useRef(false)
@@ -185,11 +236,14 @@ export function Pet() {
     const now = performance.now()
     if (!force && now - lastBoundsAt.current < 33) return
     lastBoundsAt.current = now
+    // Report what is drawn, not the actor box: the bubble hangs above her head,
+    // and standing she reaches a long way above the box.
+    const rise = perchedRef.current ? 0 : SPRITE_RISE
     capri.reportPetBounds({
       x: pos.current.x,
-      y: pos.current.y,
+      y: pos.current.y - rise,
       width: PET_W,
-      height: PET_H,
+      height: PET_H + rise,
     })
   }, [])
 
@@ -200,13 +254,49 @@ export function Pet() {
     reportBounds()
   }, [reportBounds])
 
+  // The drawn art for the pose on screen, reported by the stage. It is what the
+  // window is allowed to intercept: a fixed box around her left a wide strip of
+  // desktop dead behind her hair.
+  const spriteRect = useRef<{ left: number; top: number; width: number; height: number } | null>(
+    null,
+  )
+  const onInk = useCallback(
+    (rect: { left: number; top: number; width: number; height: number } | null) => {
+      spriteRect.current = rect
+      const actor = actorRef.current
+      if (!actor) return
+      actor.dataset.hit = rect
+        ? `${Math.round(rect.left)},${Math.round(rect.top)},${Math.round(rect.width)},${Math.round(rect.height)}`
+        : ''
+    },
+    [],
+  )
+
   const hitTest = useCallback((x: number, y: number): boolean => {
     const p = pos.current
+    const art = spriteRect.current
+    if (art) {
+      // A few pixels of grace so the outline is not a pixel hunt.
+      const pad = 3
+      return (
+        x >= p.x + art.left - pad &&
+        x <= p.x + art.left + art.width + pad &&
+        y >= p.y + art.top - pad &&
+        y <= p.y + art.top + art.height + pad
+      )
+    }
+    // Before the stage has reported: fall back to the actor box.
+    const box = perchedRef.current ? HIT : HIT_STANDING
+    const inX = x >= p.x + box.left && x <= p.x + box.left + box.width
+    if (inX && y >= p.y + box.top && y <= p.y + box.top + box.height) return true
+    // A seated pet's legs hang below the actor box. They are still her, so the
+    // window has to stay reachable where they are, or the pointer passes
+    // through her knees to whatever is on the desktop behind.
     return (
-      x >= p.x + HIT.left &&
-      x <= p.x + HIT.left + HIT.width &&
-      y >= p.y + HIT.top &&
-      y <= p.y + HIT.top + HIT.height
+      perchedRef.current &&
+      inX &&
+      y > p.y + PET_H &&
+      y <= p.y + PET_H + PERCH_ROOM
     )
   }, [])
 
@@ -500,6 +590,16 @@ export function Pet() {
       last = now
       const maxX = Math.max(0, window.innerWidth - PET_W)
 
+      // The seated art hangs 176 CSS px below her hip, so a height that leaves
+      // less than that under it would clip her legs at the window edge. This is
+      // the pose gate; the movement's own `p.y < p.baseY - 1` is "in the air",
+      // which is still true for a hop that is too low to sit at.
+      const seated = p.y <= p.baseY - PERCH_GATE
+      if (seated !== perchedRef.current) {
+        perchedRef.current = seated
+        setPerched(seated)
+      }
+
       if (modeRef.current === 'walk') {
         if (
           anchoredRef.current ||
@@ -756,6 +856,7 @@ export function Pet() {
       }
     })
     const offMouth = capri.onPetMouth((viseme) => setMouth(viseme))
+    const offListening = capri.onPetListening((active) => setListening(active))
     const offReset = capri.onPetReset(() => {
       interactiveRef.current = false
       pointer.current = { x: 0, y: 0, seen: false }
@@ -818,6 +919,7 @@ export function Pet() {
     return () => {
       offEvent()
       offMouth()
+      offListening()
       offReset()
       offCommand()
       if (annoyTimer.current !== null) {
@@ -959,9 +1061,21 @@ export function Pet() {
                       ? 'talking'
                       : mode === 'walk'
                         ? 'walking'
-                        : agent
+                        : agent === 'idle' && listening
+                          ? 'listening'
+                          : agent
+  // A pat on a ledge still gets the grin, and a drop is a drop: the drag and
+  // the one-shot reactions stay on the floor art.
+  const seated =
+    perched && state !== 'dragging' && state !== 'clicked' && state !== 'waking'
+  const posed = seated ? perchedState(state) : state
   // The glitch itself is a burst: thinking with no burst showing stands idle.
-  const shownState = state === 'thinking' && !glitchBurst ? 'idle' : state
+  const shownState =
+    (posed === 'thinking' || posed === 'perched_thinking') && !glitchBurst
+      ? seated
+        ? 'perched'
+        : 'idle'
+      : posed
 
   return (
     <div
@@ -978,6 +1092,7 @@ export function Pet() {
         ref={actorRef}
         className={`pet-actor${veiled ? ' is-veiled' : ''}`}
         data-placed={placed}
+        data-perched={perched}
         role="button"
         tabIndex={-1}
         aria-label="Capri, your desktop companion. Drag to move her, double-click to open her panel."
@@ -996,6 +1111,10 @@ export function Pet() {
             state={shownState}
             mouth={mouth}
             facing={facing}
+            growTop={STAGE_RISE}
+            growSide={STAGE_SIDE}
+            frame={[PET_W, PET_H]}
+            onInk={onInk}
             onReady={() => console.log('[capri] pet ready')}
           />
         </div>

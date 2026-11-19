@@ -33,9 +33,15 @@ class ScriptedBrain:
 
     def __init__(self, workspace: str) -> None:
         self.workspace = workspace
-        # One fresh marker per daemon run: fs.write now refuses to overwrite,
-        # and the smoke must not depend on leftover state from last time.
-        self.marker = paths.capri_home() / "run" / f"smoke-{uuid.uuid4().hex[:8]}.txt"
+        # The edit target is a fixture this brain lays down, not a file the turn
+        # creates. Policy allows a *new* file inside an allowlisted root, so a
+        # scripted fs.write into the run directory asked for no card at all;
+        # patching an existing file outside the active workspace always does.
+        # One fresh name per daemon run, so a rerun cannot depend on last time.
+        self.marker = paths.run_dir() / f"smoke-{uuid.uuid4().hex[:8]}.txt"
+        self.before = f"capri smoke {int(time.time())}\n"
+        self.marker.parent.mkdir(parents=True, exist_ok=True)
+        self.marker.write_text(self.before, encoding="utf-8")
 
     async def aclose(self) -> None:
         return None
@@ -66,7 +72,7 @@ class ScriptedBrain:
         if step == 0:
             return Decision(thought="See what's in front of me.", tool="fs.list", usage=_USAGE)
         if step == 1:
-            return Decision(thought="Drop a marker.", tool="fs.write", usage=_USAGE)
+            return Decision(thought="Edit the marker.", tool="fs.patch", usage=_USAGE)
         return Decision(
             thought="Done.",
             tool="done",
@@ -79,9 +85,14 @@ class ScriptedBrain:
     ) -> tuple[dict[str, Any], ChatResult]:
         if spec.name == "fs.list":
             return {"path": "."}, _USAGE
-        if spec.name == "fs.write":
+        if spec.name == "fs.patch":
             return {
                 "path": str(self.marker),
-                "content": f"capri smoke {int(time.time())}\n",
+                "edits": [
+                    {
+                        "old": "capri smoke ",
+                        "new": f"capri smoke approved {int(time.time())} ",
+                    }
+                ],
             }, _USAGE
         return {}, _USAGE

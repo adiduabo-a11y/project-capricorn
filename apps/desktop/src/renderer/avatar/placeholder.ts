@@ -43,6 +43,12 @@ export interface CapriFigure {
   setMouth(viseme: string): void
   setFacing(facing: 'left' | 'right'): void
   update(dtMs: number): void
+  /**
+   * The drawn art for the current pose, in the stage's own pixels (the canvas
+   * element's coordinate space), or null while the art is unknown. The window's
+   * touchable region follows this instead of a fixed box.
+   */
+  inkRect?(): { x: number; y: number; width: number; height: number } | null
   readonly state: string
 }
 

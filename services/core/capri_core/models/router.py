@@ -35,9 +35,6 @@ from . import gbnf
 
 log = logging.getLogger("capri.models")
 
-# A tool call that fails validation gets exactly one cheaper second attempt.
-_REPAIR_TEMPERATURE = 0.1
-
 # What she says when no attempt produced a usable step. The diagnostic belongs in
 # the log, not in a chat bubble: "check the structured-output setting" is not an
 # answer, and the failure is usually one bad turn rather than a broken config.
@@ -245,7 +242,6 @@ class Router:
         grammar: str | None = None,
         schema: dict[str, Any] | None = None,
         max_tokens: int = 1024,
-        temperature: float | None = None,
         structured: str | None = None,
     ) -> ChatResult:
         base = self._base
@@ -255,10 +251,12 @@ class Router:
                 "the LM Studio or llama.cpp server URL."
             )
         model = self.cfg.model.strip()
+        # No sampling parameters: the endpoint that runs the model owns them.
+        # Determinism on the structured calls comes from the grammar and schema
+        # below, not from a low temperature.
         body: dict[str, Any] = {
             "messages": wire_messages(msgs),
             "max_tokens": max_tokens,
-            "temperature": self.cfg.temperature if temperature is None else temperature,
             "stream": False,
         }
         if model:
@@ -375,7 +373,6 @@ class Router:
                     grammar=grammar,
                     schema=schema,
                     max_tokens=self.cfg.max_output_tokens,
-                    temperature=_REPAIR_TEMPERATURE,
                     structured=mode,
                 )
             except ModelUnavailable as exc:
@@ -420,7 +417,6 @@ class Router:
             grammar=gbnf.from_schema(schema),
             schema=schema,
             max_tokens=max_tokens,
-            temperature=0.1,
         )
         try:
             parsed = _decode_json(result.text)
@@ -441,7 +437,7 @@ class Router:
         ]
         result = await self.complete(
             ask, role="planner", grammar=grammar, schema=spec.params,
-            max_tokens=max(900, self.cfg.max_output_tokens), temperature=_REPAIR_TEMPERATURE,
+            max_tokens=max(900, self.cfg.max_output_tokens),
         )
 
         try:

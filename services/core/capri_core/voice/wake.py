@@ -84,17 +84,20 @@ def match_wake(text: str) -> Wake:
 _REPLIES_DAY = (
     "Yeah? I'm here.",
     "There you are.",
-    "Hm? I'm listening.",
+    "Yeah? I'm listening.",
 )
+# No hums in these lines. "Mm" was read aloud as the name Emma, and "Hm" as
+# close to it that the difference was not worth relying on, so the interjection
+# is a word the engine already knows: "Yeah".
 _REPLIES_EVENING = (
     "You have my attention.",
     "Hey. I was just thinking.",
-    "Mm? Go on.",
+    "Yeah? Go on.",
 )
 _REPLIES_LATE = (
     "Still up? I'm here.",
     "It's late. I'm listening.",
-    "Mm. You're awake too.",
+    "Yeah. You're awake too.",
 )
 
 

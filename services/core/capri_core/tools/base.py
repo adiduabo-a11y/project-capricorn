@@ -78,6 +78,9 @@ class ToolContext:
     # The workspace service. Present so project.* can read the open project;
     # it cannot open or switch one.
     project: Any = None
+    # The Obsidian vault service. Its folder is a setting, so the note tools
+    # read it here rather than taking a path they could point anywhere.
+    notes: Any = None
     # Absolute path -> sha256 at read time, for this turn. fs.read writes here
     # and fs.patch refuses a file whose hash has moved since.
     reads: dict[str, str] = field(default_factory=dict)

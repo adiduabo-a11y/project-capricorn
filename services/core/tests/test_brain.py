@@ -66,6 +66,33 @@ class FakeBrain:
         return dict(args or {}), ChatResult(text="", tokens_in=5, tokens_out=5)
 
 
+class StepBrain:
+    """Plays one decision per planner call and remembers what it was shown."""
+
+    def __init__(self, steps: list[dict[str, Any]]) -> None:
+        self.steps = steps
+        self.index = 0
+        self.seen: list[list[str]] = []
+        # One entry per planner call: the role/content of every message that
+        # would be serialized into that request.
+        self.requests: list[list[tuple[str, str]]] = []
+
+    async def available(self) -> bool:
+        return True
+
+    async def decide(self, msgs: list[Any], specs: list[Any], persona_pack: str = "kyoko") -> Decision:
+        self.seen.append([str(m.get("content", "")) for m in msgs])
+        self.requests.append(
+            [(str(m.get("role", "")), str(m.get("content", ""))) for m in msgs]
+        )
+        step = self.steps[min(self.index, len(self.steps) - 1)]
+        self.index += 1
+        return Decision(**step, usage=ChatResult(text="", tokens_in=10, tokens_out=5))
+
+    async def args(self, spec: Any, msgs: list[Any], feedback: str | None = None):
+        return {}, ChatResult(text="", tokens_in=5, tokens_out=5)
+
+
 class Harness:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
@@ -82,7 +109,14 @@ class Harness:
         return [e for e in self.events if e.get("type") == kind]
 
 
-async def run_turn(config: CapriConfig, session, brain: FakeBrain, workspace: str):
+async def run_turn(
+    config: CapriConfig,
+    session,
+    brain: FakeBrain,
+    workspace: str,
+    request: str = "do the thing",
+    turn_id: str = "trn_test",
+):
     harness = Harness()
     runner = TurnRunner(
         config=config,
@@ -95,7 +129,7 @@ async def run_turn(config: CapriConfig, session, brain: FakeBrain, workspace: st
         policy=Policy(config.policy, workspace),
         workspace=workspace,
     )
-    await runner.run("trn_test", "do the thing")
+    await runner.run(turn_id, request)
     return harness
 
 
@@ -278,6 +312,175 @@ async def test_casual_turn_no_tools(tmp: Path, config: CapriConfig) -> None:
 
     check(harness.of_type("agent.tool") == [], "casual turn makes no tool calls")
     check(harness.of_type("agent.done")[-1]["text"] == "Evening.", "casual turn answers")
+    conn.close()
+
+
+async def test_prompt_is_built_once(tmp: Path, config: CapriConfig) -> None:
+    """One system prompt per turn, one copy in each request it is sent with.
+
+    A chat-completions server keeps no session, so the prompt rides along with
+    every step; what it must not do is get rebuilt or duplicated per step.
+    """
+    conn = open_test_shard()
+    session = Session.create(conn)
+    turn_id = "trn_prompt_once"
+
+    calls = {"n": 0}
+    real = prompt_mod.system_prompt
+
+    def counting(*args: Any, **kwargs: Any) -> str:
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    brain = StepBrain(
+        [
+            {"thought": "Look.", "tool": "fs.list"},
+            {"thought": "Look again.", "tool": "fs.list"},
+            {"thought": "", "tool": "done", "final": "Listed."},
+        ]
+    )
+    prompt_mod.system_prompt = counting
+    try:
+        await run_turn(config, session, brain, str(tmp), turn_id=turn_id)
+    finally:
+        prompt_mod.system_prompt = real
+
+    check(len(brain.requests) == 3, f"three planner calls: {len(brain.requests)}")
+    check(calls["n"] == 1, f"the prompt was built once, not per step: {calls['n']}")
+    systems = [
+        [content for role, content in request if role == "system"]
+        for request in brain.requests
+    ]
+    check(all(len(found) == 1 for found in systems), f"one copy per request: {[len(f) for f in systems]}")
+    check(
+        len({found[0] for found in systems if found}) == 1,
+        "every step sends the identical prompt",
+    )
+    conn.close()
+
+
+def test_announces_action() -> None:
+    """The predicate names promises, not every future tense."""
+    for line in [
+        "I'll write the file now.",
+        "I will check that.",
+        "I'm going to patch it.",
+        "Let me read the log first.",
+        "On it.",
+    ]:
+        check(prompt_mod.announces_action(line), f"promises work: {line!r}")
+    for line in [
+        "I'll be here.",
+        "I'll let you know.",
+        "Sure, the sky is green.",
+        "",
+    ]:
+        check(not prompt_mod.announces_action(line), f"is just talking: {line!r}")
+
+
+def nudges_for(conn: Any, turn_id: str) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in db.recent_traces(conn, 500)
+        if row["name"] == "turn.nudge" and row["turn_id"] == turn_id
+    ]
+
+
+async def test_announced_action_is_nudged(tmp: Path, config: CapriConfig) -> None:
+    """Saying she will do the work is not doing it: the turn asks again."""
+    conn = open_test_shard()
+    session = Session.create(conn)
+    turn_id = "trn_nudge"
+    brain = StepBrain(
+        [
+            {"thought": "", "tool": "done", "final": "I'll write the file now."},
+            {"thought": "", "tool": "done", "final": "Wrote it."},
+        ]
+    )
+    harness = await run_turn(config, session, brain, str(tmp), turn_id=turn_id)
+
+    check(len(brain.seen) == 2, f"the planner was asked again: {len(brain.seen)} calls")
+    check(
+        any("no tool ran" in text for text in brain.seen[-1]),
+        "the nudge reached the model",
+    )
+    check(
+        any("I'll write the file now." in text for text in brain.seen[-1]),
+        "the model saw what it said it would do",
+    )
+    check(
+        harness.of_type("agent.done")[-1]["text"] == "Wrote it.",
+        "the announcement did not end the turn",
+    )
+    check(len(nudges_for(conn, turn_id)) == 1, "the nudge was traced")
+    rows = conn.execute(
+        "SELECT role, content FROM messages WHERE turn_id = ? ORDER BY id", (turn_id,)
+    ).fetchall()
+    assistant = [row["content"] for row in rows if row["role"] == "assistant"]
+    check(assistant == ["Wrote it."], f"only the real answer was persisted: {assistant}")
+    conn.close()
+
+
+async def test_nudges_are_bounded(tmp: Path, config: CapriConfig) -> None:
+    """A model that will not act is not asked forever."""
+    conn = open_test_shard()
+    session = Session.create(conn)
+    turn_id = "trn_nudge_twice"
+    same = {"thought": "", "tool": "done", "final": "I'll start on it now."}
+    brain = StepBrain([same, same, same])
+    harness = await run_turn(config, session, brain, str(tmp), turn_id=turn_id)
+
+    check(len(brain.seen) == 3, f"two nudges, three planner calls: {len(brain.seen)}")
+    check(len(nudges_for(conn, turn_id)) == 2, "both nudges were traced")
+    check(
+        harness.of_type("agent.done")[-1]["text"] == "I'll start on it now.",
+        "the third refusal stands instead of looping",
+    )
+    conn.close()
+
+
+async def test_nudge_on_the_last_step(tmp: Path, config: CapriConfig) -> None:
+    """With no step left to act in, her reply survives and the truth follows."""
+    conn = open_test_shard()
+    session = Session.create(conn)
+    turn_id = "trn_nudge_ceiling"
+    # One step: the first decision is also the last, which is the case where a
+    # nudge used to fall out of the loop and lose the reply.
+    tight = config.model_copy(deep=True)
+    tight.agent.max_steps = 1
+    brain = StepBrain(
+        [{"thought": "", "tool": "done", "final": "I'll write the file now."}]
+    )
+    harness = await run_turn(tight, session, brain, str(tmp), turn_id=turn_id)
+
+    text = harness.of_type("agent.done")[-1]["text"]
+    check(text.startswith("I'll write the file now."), f"her reply is not lost: {text!r}")
+    check("nothing actually ran" in text, "it says the work did not happen")
+    check("last step" in text, "it names why")
+    check(not text.startswith("I hit the"), "the generic ceiling line is not used")
+    check(len(brain.seen) == 1, f"no pointless second call: {len(brain.seen)}")
+    check(len(nudges_for(conn, turn_id)) == 1, "the announcement was still traced")
+    conn.close()
+
+
+async def test_conversation_is_not_nudged(tmp: Path, config: CapriConfig) -> None:
+    """A promise made in conversation is not a broken one."""
+    conn = open_test_shard()
+    session = Session.create(conn)
+    turn_id = "trn_nudge_chat"
+    brain = StepBrain(
+        [{"thought": "", "tool": "done", "final": "I'll write it when you ask."}]
+    )
+    harness = await run_turn(
+        config, session, brain, str(tmp), request="hey, capri", turn_id=turn_id
+    )
+
+    check(len(brain.seen) == 1, f"a greeting is answered once: {len(brain.seen)} call(s)")
+    check(
+        harness.of_type("agent.done")[-1]["text"] == "I'll write it when you ask.",
+        "the reply stands",
+    )
+    check(nudges_for(conn, turn_id) == [], "no nudge was traced")
     conn.close()
 
 
@@ -479,6 +682,42 @@ def test_work_prompt(tmp: Path) -> None:
         "the screen protocol follows the workspace block",
     )
 
+    # The injection is re-sent on every step of a turn, so its size is pinned:
+    # a new tool or a reworded paragraph has to fit, not just compile.
+    # Raised once from 8,350/8,980 when the three note tools landed (measured
+    # 8,524/9,149): the vault is a capability she has to be able to discover,
+    # and its three index lines are the whole cost of it.
+    specs = builtin_registry().specs()
+    plain = prompt_mod.system_prompt(
+        specs, "kyoko", profile="focus", request="fix the failing test"
+    )
+    check(len(plain) <= 8600, f"system prompt is {len(plain)} chars")
+    with_work = prompt_mod.system_prompt(
+        specs,
+        "kyoko",
+        profile="focus",
+        request="fix the failing test",
+        work=prompt_mod.WorkContext(
+            workspace_id="w", task_id="t", name="p", root="C:/p"
+        ),
+    )
+    check(len(with_work) <= 9220, f"work prompt is {len(with_work)} chars")
+
+    index = prompt_mod.describe_tools(specs)
+    check(
+        index.count("[asks] = the person is asked before that tool runs.") == 1,
+        "consent is explained once, in a legend",
+    )
+    check("unattended" not in index, "the legend does not claim the rest are silent")
+    check("asks the person first" not in index, "no row repeats the consent suffix")
+    # Count from the registry, not a constant: the marker has to be on every row
+    # that asks, and adding a tool must not look like a broken legend.
+    asking = sum(1 for spec in specs if prompt_mod.consent_note(spec) == "asks the person first")
+    check(
+        index.count("[asks]") == asking + 1,
+        f"the marker is on each of the {asking} asking rows, plus the legend",
+    )
+
 
 def test_event_fields() -> None:
     event = _event("memory.written", kind="fact", text="x")
@@ -516,6 +755,18 @@ async def main() -> int:
         await test_failed_decision_not_persisted(tmp, config)
         print("loop: casual turn")
         await test_casual_turn_no_tools(tmp, config)
+        print("loop: prompt built once")
+        await test_prompt_is_built_once(tmp, config)
+        print("nudge: predicate")
+        test_announces_action()
+        print("nudge: announced action")
+        await test_announced_action_is_nudged(tmp, config)
+        print("nudge: bounded")
+        await test_nudges_are_bounded(tmp, config)
+        print("nudge: last step")
+        await test_nudge_on_the_last_step(tmp, config)
+        print("nudge: conversation")
+        await test_conversation_is_not_nudged(tmp, config)
         print("loop: workspace and task ids")
         await test_turn_carries_work_ids(tmp, config)
         print("prompt")

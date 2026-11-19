@@ -35,16 +35,74 @@ _FENCE = re.compile(r"```.*?```", re.S)
 _INLINE_CODE = re.compile(r"`([^`]*)`")
 _MARKUP = re.compile(r"[*_#>]+")
 _SPACE = re.compile(r"\s+")
+# A dash is not in the pack's lexicon: sherpa drops it, silently, and the clause
+# runs on unpunctuated. A comma is what a spoken dash is.
+_DASH = re.compile(r"\s*[\u2014\u2013]\s*|\s+-+\s+")
+_HYPHEN = re.compile(r"(?<=[A-Za-z])-(?=[A-Za-z])")
+# A hum is a sound, and the engine has no word for it: it reads "Mm" as the name
+# Emma, and "Hm" close enough to it. So it never reaches the engine at all.
+_HUM = re.compile(r"\b(?:[hH]+[mM]+|[mM]{2,}[hH]*[mM]*)\b")
+# A quote is not something the engine says, so it can never be the reason a hum
+# leaves a mark: it stays where it is, and a quote that held only the hum goes
+# with it. Escaped, like the dashes above, to keep the source ASCII.
+_QUOTES = "\"'\u201c\u201d\u2018\u2019"
 _SENTENCE_END = re.compile(r"(?<=[.!?…])\s+")
 _CLAUSE = re.compile(r"(?<=[;:,])\s+")
+# A fragment that ends on a letter, a digit or a closing quote is not closed.
+_VOICED_END = re.compile(r"[A-Za-z0-9\"')\]]$")
+
+def _drop_hums(text: str) -> str:
+    """Take the hum out, with the punctuation that belonged to the hum.
+
+    "Hmm, that's odd." says "That's odd.": the comma goes with the hum, and the
+    clause keeps the capital it needs to start a sentence. Quote characters are
+    silent, so they stay where they were: '"Hmm," she said.' keeps one pair, not
+    the '\"\"' of a hum taken out from between them. "Mm." alone says nothing at
+    all, so a reply that is only a hum is not spoken.
+    """
+    out = text
+    while True:
+        match = _HUM.search(out)
+        if match is None:
+            return out
+        before = out[: match.start()].rstrip()
+        # The comma, stop or dash after a hum was the hum's own phrase break.
+        after = out[match.end() :].lstrip(" \t,;:-\u2014\u2013.!?\u2026")
+        head = before.rstrip(_QUOTES).rstrip()
+        # A quoted hum was the whole quote: there is nothing left to quote.
+        quoted = len(head) < len(before) and after[:1] in _QUOTES
+        if quoted:
+            before = head.rstrip(" \t,;:-\u2014\u2013")
+            after = after[1:].lstrip()
+        elif not after:
+            before = before.rstrip(_QUOTES).rstrip(" \t,;:-\u2014\u2013").rstrip(_QUOTES)
+        if not head or head[-1] in ".!?\u2026":
+            after = after[:1].upper() + after[1:] if after else after
+        joiner = " " if before and after and after[0].isalnum() and before[-1] not in _QUOTES else ""
+        out = f"{before}{joiner}{after}"
 
 
 def clean_for_speech(text: str) -> str:
     """Drop what should not be read aloud: fences, markup, excess whitespace."""
     without_fences = _FENCE.sub(" ", text or "")
     without_code = _INLINE_CODE.sub(r"\1", without_fences)
-    plain = _MARKUP.sub("", without_code)
+    joined = _HYPHEN.sub(" ", _DASH.sub(", ", without_code))
+    plain = _MARKUP.sub("", _drop_hums(joined))
     return _SPACE.sub(" ", plain).strip()
+
+
+def _spoken(sentence: str) -> str:
+    """The text handed to the engine.
+
+    A fragment with no terminal stop is what a clipped tail sounds like: the
+    engine has nothing to close the contour on and takes the last phoneme with
+    it. A clause break (a trailing comma from ``_wrap``) is deliberate and is
+    left alone, so the intonation still rises into the next segment.
+    """
+    sentence = sentence.strip()
+    if sentence and _VOICED_END.search(sentence):
+        return sentence + "."
+    return sentence
 
 
 def _wrap(sentence: str, limit: int) -> list[str]:
@@ -125,6 +183,7 @@ class VoiceService:
             "wake": {
                 "enabled": self.config.voice.wake.enabled,
                 "silenceMs": self.config.voice.wake.silence_ms,
+                "nameGraceMs": self.config.voice.wake.name_grace_ms,
                 "followUpMs": self.config.voice.wake.follow_up_ms,
                 "thresholdRms": self.config.voice.wake.threshold_rms,
                 "minUtteranceMs": self.config.voice.wake.min_utterance_ms,
@@ -207,7 +266,9 @@ class VoiceService:
                     if stop_event.is_set():
                         break
                     try:
-                        audio = await asyncio.to_thread(self._synthesize, sentence)
+                        audio = await asyncio.to_thread(
+                            self._synthesize, _spoken(sentence)
+                        )
                     except TtsUnavailable as exc:
                         log.warning("segment %d failed: %s", index, exc)
                         break
@@ -362,6 +423,33 @@ class VoiceService:
         await asyncio.to_thread(self.stt.warm)
         return {"loaded": True}
 
+    async def prewarm(self) -> dict[str, Any]:
+        """Load the speech engine off the event loop, before anyone speaks.
+
+        Pocket takes ~11 s to load its base model and her voice state on this
+        CPU. At startup that is invisible; inside her first reply it is a
+        silence the user hears. An engine that refuses, or a voice that is
+        switched off, is left alone: a daemon may never speak at all.
+        """
+        if not self.config.voice.enabled:
+            return {"loaded": False, "reason": "voice disabled"}
+        reason = self.engine.reason()
+        if reason:
+            log.info("speech warm-up skipped: %s", reason)
+            return {"loaded": False, "reason": reason}
+        loader = getattr(self.engine, "load", None)
+        if not callable(loader):
+            return {"loaded": False, "reason": f"{self.engine.name} loads with its first line"}
+        started = time.monotonic()
+        try:
+            await asyncio.to_thread(loader)
+        except Exception as exc:  # a bad model must not take the daemon down
+            log.warning("speech warm-up failed: %s", exc)
+            return {"loaded": False, "reason": str(exc)}
+        ms = int((time.monotonic() - started) * 1000)
+        log.info("%s warm in %d ms", self.engine.name, ms)
+        return {"loaded": True, "engine": self.engine.name, "ms": ms}
+
     async def calibrate(self, noise: list[bytes], speech: list[bytes]) -> dict[str, Any]:
         """Measure the room, the voice, and what the recogniser makes of it.
 
@@ -474,12 +562,20 @@ class VoiceService:
 
     @staticmethod
     def _rejection(result: dict[str, Any], reason: str) -> dict[str, Any]:
-        """What the gate saw, without what it heard: a trace is not a recording."""
+        """What the gate saw, without what it heard: a trace is not a recording.
+
+        `chars` is the length of the transcript, not the words. It is the one
+        fact that separates "she never heard the rest of the sentence" from
+        "she heard it and the gate said no", which is otherwise unanswerable
+        once the text is discarded.
+        """
+        text = result.get("text")
         return {
             "reason": reason,
             "confidence": result.get("confidence"),
             "noSpeechProb": result.get("noSpeechProb"),
             "durationMs": result.get("durationMs"),
+            "chars": len(text) if isinstance(text, str) else 0,
             "ms": result.get("ms"),
             "at": int(time.time()),
         }

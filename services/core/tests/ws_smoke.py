@@ -11,6 +11,13 @@ shard. A home without voice weights skips the speak/barge-in pair (reported as
 a skip, not a pass). CAPRI_SMOKE_URL overrides the default port. The project
 section opens a temporary folder and closes it again, restoring whatever was
 already open.
+
+The one card this expects is a destructive call the scripted brain makes on
+purpose: an fs.patch of a fixture in the daemon's run directory, which sits
+outside any workspace, so the verdict does not depend on policy.allow_paths. The
+check reads policy.confirm.destructive rather than assuming a card — a daemon set
+never to ask is expected to raise none — and then confirms the edit actually
+landed, so a wire-level approval is never counted on its own.
 """
 
 from __future__ import annotations
@@ -141,7 +148,8 @@ async def check_project(ws) -> None:
         check("npm test" in commands, "project.inspect detects the test command")
 
         # A turn with a project open must carry its workspace id, and the
-        # scripted brain's two calls must still land inside it.
+        # scripted brain's two calls must still run (the edit is outside the
+        # project, so this turn asks first and drain_turn approves it).
         sent = await rpc(ws, "p6", "turn.send", {"text": "hello from the project"})
         project_turn = (sent.get("result") or {}).get("turnId", "")
         done = await drain_turn(ws, project_turn)
@@ -276,6 +284,19 @@ async def main() -> int:
         ping = await rpc(ws, "r1", "ping")
         check(ping["result"]["pong"] is True, "ping/pong")
 
+        # The scripted turn edits a fixture in the daemon's run directory, which
+        # is outside the active workspace, so fs.patch is a destructive call by
+        # policy. The one posture that turns that into a silent allow is
+        # confirm.destructive = never, so read the posture instead of assuming.
+        posture = await rpc(ws, "r1b", "config.get")
+        confirm_cfg = (((posture.get("result") or {}).get("policy") or {}).get("confirm")) or {}
+        asks = confirm_cfg.get("destructive", "always") == "always"
+        run_dir = paths.run_dir()
+        marks_before = {
+            item.name: item.read_text(encoding="utf-8", errors="replace")
+            for item in run_dir.glob("smoke-*.txt")
+        }
+
         sent = await rpc(ws, "r2", "turn.send", {"text": "hello capri"})
         turn_id = sent["result"]["turnId"]
         check(bool(turn_id), "turn accepted")
@@ -306,7 +327,24 @@ async def main() -> int:
         check(done is not None, "turn completed")
         check(bool((done or {}).get("text", "").strip()), "turn produced a reply")
         check(states[:1] == ["thinking"], f"state order {states}")
-        check(confirms == 1, f"asked for approval ({confirms})")
+        check(
+            confirms == (1 if asks else 0),
+            f"asked for approval ({confirms}, destructive={confirm_cfg.get('destructive', 'always')})",
+        )
+        # The card is only half of it: the call it approved has to have run.
+        marks_after: list[str] = []
+        for _ in range(20):
+            marks_after = [
+                item.name
+                for item in run_dir.glob("smoke-*.txt")
+                if marks_before.get(item.name)
+                != item.read_text(encoding="utf-8", errors="replace")
+            ]
+            if marks_after:
+                break
+            await asyncio.sleep(0.1)
+        wrote = "the approved edit landed" if asks else "the edit landed with no card"
+        check(bool(marks_after), f"{wrote}: {marks_after[:1]}")
         if done:
             print(f"  .... {done['usage']}")
 

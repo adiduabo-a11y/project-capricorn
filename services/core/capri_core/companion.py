@@ -1100,7 +1100,6 @@ class Companion:
                 msgs,
                 role="reflex",
                 max_tokens=100,
-                temperature=0.8,
             )
             return _clean(getattr(result, "text", "")) or self._fallback_line(
                 window, talk, working=working, upkeep=upkeep

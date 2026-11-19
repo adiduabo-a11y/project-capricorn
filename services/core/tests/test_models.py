@@ -57,7 +57,8 @@ def test_wake_config() -> None:
     check(config.voice.wake.enabled, "the wake gate is on by default")
     check(config.voice.wake.min_confidence == 0.35, "confidence default is 0.35")
     check(config.voice.wake.max_no_speech_prob == 0.6, "no-speech default is 0.6")
-    check(config.voice.wake.silence_ms == 700, "silence gap default is 700 ms")
+    check(config.voice.wake.silence_ms == 550, "silence gap default is 550 ms")
+    check(config.voice.wake.name_grace_ms == 700, "name grace default is 700 ms")
     check(config.voice.wake.follow_up_ms == 6000, "follow-up window default is 6 s")
     check(config.voice.wake.threshold_rms == 0.012, "speech threshold default is 0.012")
     check(config.voice.wake.min_utterance_ms == 300, "shortest utterance default is 300 ms")
@@ -67,6 +68,7 @@ def test_wake_config() -> None:
         "min_confidence",
         "max_no_speech_prob",
         "silence_ms",
+        "name_grace_ms",
         "follow_up_ms",
         "threshold_rms",
         "min_utterance_ms",
@@ -157,7 +159,10 @@ models:
     check(config.models.embed.name == "", "legacy embedding preset is cleared")
     check(config.models.rerank.name == "", "legacy rerank preset is cleared")
     check(config.models.embed.dim == 1024, "embedding dimension is preserved")
-    check(config.models.temperature == 0.6, "planner temperature is preserved")
+    check(
+        "temperature" not in config.models.model_dump(),
+        "a legacy sampler setting is dropped",
+    )
     check(config.models.structured == "grammar", "explicit legacy structured mode is preserved")
 
     custom = """\
@@ -171,7 +176,27 @@ models:
 """
     chosen = load_config_with(custom)
     check(chosen.models.model == "my-local-model", "a custom model choice is preserved")
-    check(chosen.models.temperature == 0.4, "custom planner temperature is preserved")
+    check(
+        "temperature" not in chosen.models.model_dump(),
+        "a custom planner temperature is dropped too",
+    )
+
+    # A config written by the current version has the field at the top level of
+    # `models`, not inside the old planner block. It has to load, not raise.
+    modern = """\
+models:
+  endpoint: http://127.0.0.1:8080/v1
+  temperature: 0.9
+"""
+    loaded = load_config_with(modern)
+    check(
+        "temperature" not in loaded.models.model_dump(),
+        "a retired top-level temperature is dropped, not rejected",
+    )
+    check(
+        loaded.models.endpoint == "http://127.0.0.1:8080/v1",
+        "the rest of that file still loads",
+    )
 
 
 def load_config_with(text: str) -> CapriConfig:
@@ -399,7 +424,7 @@ async def test_request_shape() -> None:
         result = await router.complete([Msg("user", "hello")])
         check(result.text == "ok", "request completes")
         check("model" not in bodies[0], "a blank model ID is omitted")
-        check(bodies[0]["temperature"] == 0.6, "configured temperature is used")
+        check("temperature" not in bodies[0], "sampling is left to the server")
 
         configured = config.models.model_copy(update={"model": "local-id"})
         router.reconfigure(configured)

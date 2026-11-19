@@ -18,8 +18,8 @@ const api = {
     return ipcRenderer.invoke('capri:open-file', path, offset)
   },
 
-  chooseFolder() {
-    return ipcRenderer.invoke('capri:choose-folder')
+  chooseFolder(title) {
+    return ipcRenderer.invoke('capri:choose-folder', title)
   },
 
   setWorkLayout(active) {
@@ -122,6 +122,12 @@ const api = {
     return () => ipcRenderer.off('capri:pet-mouth', listener)
   },
 
+  onPetListening(handler) {
+    const listener = (_event, active) => handler(!!active)
+    ipcRenderer.on('capri:pet-listening', listener)
+    return () => ipcRenderer.off('capri:pet-listening', listener)
+  },
+
   onPetReset(handler) {
     const listener = () => handler()
     ipcRenderer.on('capri:pet-reset', listener)
@@ -134,6 +140,10 @@ const api = {
 
   petCue(cue) {
     ipcRenderer.send('capri:pet-cue', String(cue || ''))
+  },
+
+  petListening(active) {
+    ipcRenderer.send('capri:pet-listening', !!active)
   },
 
   ready() {

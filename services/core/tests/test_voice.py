@@ -14,6 +14,7 @@ import importlib.machinery
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -43,6 +44,7 @@ from capri_core.voice import (
     split_sentences,
 )
 from capri_core.voice import dsp
+from capri_core.voice.service import clean_for_speech
 from capri_core.voice import wav as wav_mod
 from capri_core.voice.stt import SttUnavailable, Transcript
 from capri_core.voice.tts import KokoroEngine
@@ -326,6 +328,163 @@ async def test_aside_never_preempts(service: VoiceService) -> None:
     check(first_stats["reason"] == "cancelled", "a reply still preempts an aside")
 
 
+class RecordingEngine(ToneEngine):
+    """Tone audio, and the text each segment was built from."""
+
+    def __init__(self, config: CapriConfig) -> None:
+        super().__init__(config)
+        self.texts: list[str] = []
+
+    def synthesize(self, text: str, *, voice: str, speed: float) -> Any:
+        self.texts.append(text)
+        return super().synthesize(text, voice=voice, speed=speed)
+
+
+async def test_spoken_text(config: CapriConfig) -> None:
+    """The engine gets a closed sentence, not a fragment that ends nowhere."""
+    config = config.model_copy(deep=True)
+    config.voice.sentence_max_chars = 40
+    engine = RecordingEngine(config)
+    service = VoiceService(config, engine, stt=WakeStt("hello"))
+
+    await service.speak("trn_txt", "No stop here", Sink())
+    check(engine.texts == ["No stop here."], f"a bare fragment is closed: {engine.texts}")
+
+    engine.texts.clear()
+    await service.speak("trn_txt2", "Done. Next one", Sink())
+    check(engine.texts == ["Done.", "Next one."], f"every segment is closed: {engine.texts}")
+
+    # A clause break is deliberate: it is the point where the intent was to
+    # split, and forcing a full stop there would flatten the sentence.
+    engine.texts.clear()
+    await service.speak(
+        "trn_txt3",
+        "First clause ends here, and the second clause runs well past the limit.",
+        Sink(),
+    )
+    check(len(engine.texts) > 1, f"the long sentence was wrapped: {engine.texts}")
+    check(
+        engine.texts[0].endswith(",") and not engine.texts[0].endswith(",."),
+        f"a clause break is left alone: {engine.texts[0]!r}",
+    )
+    check(
+        engine.texts[0].startswith("First clause"),
+        f"the first clause is unchanged: {engine.texts[0]!r}",
+    )
+
+
+async def test_hum(config: CapriConfig) -> None:
+    """No hums: "Mm" was read as the name Emma, and "Hm" was close enough."""
+    # Every line she can answer a bare name with, across a whole day.
+    lines = {
+        acknowledge(time.mktime((2026, 11, 18, hour, minute, 0, 0, 0, -1)))
+        for hour in range(24)
+        for minute in range(0, 60, 7)
+    }
+    check(len(lines) >= 3, f"the acknowledgements still vary by the hour: {len(lines)}")
+    hum = re.compile(r"\b[mh]m+\b", re.IGNORECASE)
+    check(
+        not any(hum.search(line) for line in lines),
+        f"no wake line hums: {sorted(lines)}",
+    )
+    check(any("Yeah" in line for line in lines), "the interjection is a word, not a hum")
+
+    # A dash is not in her lexicon, so it is never handed to the engine: sherpa
+    # drops it silently, which runs one clause into the next.
+    spoken = split_sentences("Two things before you go - the build passed.")
+    check(
+        not any("-" in piece for piece in spoken),
+        f"a spoken dash becomes a comma: {spoken}",
+    )
+    check(
+        any(piece.startswith("the build") or ", the build" in piece for piece in spoken),
+        f"the clause after the dash is still there: {spoken}",
+    )
+
+    # A hum in her own reply never reaches the engine either: it is a sound, not
+    # a word, and the model has no pronunciation for it that is not a name.
+    engine = RecordingEngine(config)
+    service = VoiceService(config, engine, stt=WakeStt("hello"))
+    for line in sorted(lines):
+        await service.speak("trn_hum", line, Sink())
+    offenders = [text for text in engine.texts if hum.search(text)]
+    check(bool(engine.texts), "the acknowledgement lines were actually spoken")
+    check(not offenders, f"the engine is never given a hum: {offenders}")
+    await service.speak("trn_hum2", "Hmm, that's odd.", Sink())
+    check(
+        any(text == "That's odd." for text in engine.texts),
+        f"a leading hum is dropped, with its comma and its capital: {engine.texts[-1:]}",
+    )
+    await service.speak("trn_hum3", "Well, hmm, maybe later.", Sink())
+    check(
+        any(text == "Well, maybe later." for text in engine.texts),
+        f"a hum mid-sentence takes the comma that followed it: {engine.texts[-1:]}",
+    )
+    spoken = split_sentences("Hmm.")
+    check(spoken == [], f"a reply that is only a hum says nothing at all: {spoken}")
+    check(
+        clean_for_speech("Emma said so.") == "Emma said so.",
+        "a name that holds mm is not a hum",
+    )
+    quoted = clean_for_speech('"Hmm," she said.')
+    check(quoted == "She said.", f"a hum was all the quote held: {quoted!r}")
+    partial = clean_for_speech('"Hmm, that\'s odd," she said.')
+    check(
+        partial == '"That\'s odd," she said.',
+        f"the quote stays, and the clause past it: {partial!r}",
+    )
+    inline = clean_for_speech('He said "Hmm," and left.')
+    check(inline == "He said and left.", f"the quotes do not pile up: {inline!r}")
+
+
+async def test_cue_never_cuts_a_reply(config: CapriConfig) -> None:
+    """`voice.speak` carries preempt, so a cue cannot cut an answer in half."""
+    from capri_core.server.app import CapriServer
+
+    service = VoiceService(config, ToneEngine(config), stt=WakeStt("hello"))
+    sink = Sink(delay=0.05)
+    answer = asyncio.create_task(
+        service.speak("trn_answer", "One. Two. Three. Four. Five.", sink)
+    )
+    await asyncio.sleep(0.08)
+
+    # A cue goes through the same RPC the shell uses, with preempt: false.
+    cue_sink = Sink()
+    stub = types.SimpleNamespace(
+        voice=service,
+        _voice_tasks=set(),
+        _require_session=lambda client: client.session,
+        _voice_done=lambda task: None,
+    )
+    client = types.SimpleNamespace(session=object(), send=cue_sink)
+    started = await CapriServer._voice_speak(stub, client, {"text": "Hm?", "preempt": False})
+    check(started.get("started") is True, f"the cue RPC accepted the call: {started}")
+    for task in list(stub._voice_tasks):
+        await task
+
+    stats = await answer
+    check(stats["reason"] == "done", f"the answer was not interrupted: {stats['reason']}")
+    check(
+        len(sink.of("speech.segment")) == 5,
+        f"every segment of the answer went out: {len(sink.of('speech.segment'))}",
+    )
+    check(cue_sink.of("speech.segment") == [], "the refused cue emitted nothing")
+
+    # Omitting preempt is still what a turn's own reply needs.
+    live = asyncio.create_task(
+        service.speak("trn_live", "One. Two. Three. Four. Five.", Sink(delay=0.05))
+    )
+    await asyncio.sleep(0.08)
+    await CapriServer._voice_speak(stub, client, {"text": "Short.", "turnId": "trn_cue"})
+    for task in list(stub._voice_tasks):
+        await task
+    live_stats = await live
+    check(
+        live_stats["reason"] == "cancelled",
+        f"a reply RPC still preempts by default: {live_stats['reason']}",
+    )
+
+
 class WakeStt:
     """A canned recogniser: the test controls what was heard, and how sure."""
 
@@ -540,6 +699,10 @@ async def test_wake_rejection_trace(config: CapriConfig) -> None:
     check(payload.get("reason") == "low-confidence", f"the trace names the reason: {payload}")
     check(payload.get("confidence") == 0.1, f"the trace carries the confidence: {payload}")
     check(payload.get("noSpeechProb") == 0.0, "the trace carries the no-speech probability")
+    check(
+        payload.get("chars") == len("Capri, open it"),
+        f"the trace carries how much was heard, not what: {payload}",
+    )
     check("text" not in payload, "the trace does not store what was overheard")
 
     stt.confidence = 1.0
@@ -553,6 +716,10 @@ async def test_wake_rejection_trace(config: CapriConfig) -> None:
     check(
         service.status()["wake"]["lastRejection"]["reason"] == "low-confidence",
         "status keeps the last rejection after a later match",
+    )
+    check(
+        service.status()["wake"]["lastRejection"].get("chars") == len("Capri, open it"),
+        "status keeps the transcript length too",
     )
 
 
@@ -890,6 +1057,8 @@ async def test_wake_listen(config: CapriConfig) -> None:
     check(service.status()["wake"]["enabled"], "voice.status reports the wake settings")
     check(service.status()["wake"]["thresholdRms"] == 0.012, "status carries the gate threshold")
     check(service.status()["wake"]["minUtteranceMs"] == 300, "status carries the shortest utterance")
+    check(service.status()["wake"]["silenceMs"] == 550, "status carries the trailing silence")
+    check(service.status()["wake"]["nameGraceMs"] == 700, "status carries the name grace")
 
     ordinary = VoiceService(config, ToneEngine(config), stt=WakeStt("hello there"))
     check(not (await ordinary.wake(b"RIFF fake wav"))["matched"], "an ordinary sentence does not wake")
@@ -990,17 +1159,37 @@ async def test_unavailable(config: CapriConfig, tmp: Path) -> None:
 
 def test_clone_engine(config: CapriConfig, tmp: Path) -> None:
     from capri_core.voice import build_engine
-    from capri_core.voice.clone import ChatterboxEngine, reference_path
+    from capri_core.voice.clone import ChatterboxEngine, interpreter_path, reference_path
 
     config.voice.tts = "chatterbox"
     config.voice.reference_clip = str(tmp / "my-clip.wav")
     engine = build_engine(config)
     check(isinstance(engine, ChatterboxEngine), "chatterbox is a real engine, not a stub")
-    check(not engine.available(), "unavailable without chatterbox-tts")
-    check("chatterbox-tts" in engine.reason(), f"reason names the package: {engine.reason()[:50]}")
     check(
         str(reference_path(config)).endswith("my-clip.wav"),
         f"reference path honours voice.reference_clip: {reference_path(config)}",
+    )
+    check(not engine.available(), "unavailable without a reference clip")
+    check("reference clip" in engine.reason(), f"the missing clip is named: {engine.reason()[:60]}")
+
+    # A clip, but nothing to run the model with: say both, because either one
+    # is what the person has to install.
+    clip = tmp / "clip.wav"
+    clip.write_bytes(wav_mod.to_wav(np.zeros(4800, dtype=np.float32), 24_000))
+    config.voice.reference_clip = str(clip)
+    engine = ChatterboxEngine(config)
+    if importlib.util.find_spec("chatterbox") is None:
+        check(not engine.available(), "unavailable without chatterbox-tts")
+        check(
+            "chatterbox-tts" in engine.reason(),
+            f"reason names the package: {engine.reason()[:60]}",
+        )
+        check("interpreter" in engine.reason(), "and where the clone interpreter is expected")
+
+    parts = interpreter_path(config).parts
+    check(
+        "chatterbox" in parts and "venv" in parts,
+        f"the clone interpreter defaults to its own venv: {interpreter_path(config)}",
     )
 
     config.voice.reference_clip = ""
@@ -1014,6 +1203,88 @@ def test_clone_engine(config: CapriConfig, tmp: Path) -> None:
     status = service.status()
     check(status.get("reference") == str(default), "status reports the reference path")
     check(status.get("referenceReady") is False, "status says the reference is missing")
+
+
+def test_lexicon_merge(tmp: Path) -> None:
+    """The forms the pack omits, derived from the base each one comes from."""
+    from capri_core.voice import lexicon
+
+    source = tmp / "lexicon.txt"
+    source.write_text(
+        "app \u02c8 \u00e6 p\n"
+        "carry k \u02c8 \u025b \u0279 i\n"
+        "stop s t \u02c8 \u0251 p\n"
+        "dance d \u02c8 \u00e6 n s\n"
+        "expect \u026a k s p \u02c8 \u025b k t\n",
+        encoding="utf-8",
+    )
+    target = tmp / "merged.txt"
+    added = lexicon.merge(source, target)
+    merged = lexicon.read_lexicon(target)
+    check(added > 0, f"the merge adds forms: {added}")
+    check(merged["app"] == ["\u02c8", "\u00e6", "p"], "the base entry is kept as written")
+    check(merged.get("apps") == ["\u02c8", "\u00e6", "p", "s"], f"plural: {ascii(merged.get('apps'))}")
+    check(
+        merged.get("dances") == ["d", "\u02c8", "\u00e6", "n", "s", "\u026a", "z"],
+        f"plural after a sibilant: {ascii(merged.get('dances'))}",
+    )
+    check(
+        merged.get("stopped") == ["s", "t", "\u02c8", "\u0251", "p", "t"],
+        f"a doubled consonant takes the voiceless ending: {ascii(merged.get('stopped'))}",
+    )
+    check(
+        merged.get("dancing") == ["d", "\u02c8", "\u00e6", "n", "s", "\u026a", "\u014b"],
+        f"a dropped e is not in the gerund: {ascii(merged.get('dancing'))}",
+    )
+    check(
+        merged.get("carries") == ["k", "\u02c8", "\u025b", "\u0279", "i", "z"],
+        f"y becomes ies: {ascii(merged.get('carries'))}",
+    )
+    check(merged.get("expects") == ["\u026a", "k", "s", "p", "\u02c8", "\u025b", "k", "t", "s"], f"expects: {ascii(merged.get('expects'))}")
+
+    # The pack's file is never rewritten, and a second call reuses the merge.
+    check("apps" not in lexicon.read_lexicon(source), "the source lexicon is untouched")
+    kept = lexicon.merged_lexicon(source)
+    first = kept.stat().st_mtime_ns
+    again = lexicon.merged_lexicon(source)
+    check(
+        again == kept and again.stat().st_mtime_ns == first,
+        "a warm merge is reused, not rebuilt",
+    )
+
+
+def test_clone_worker(config: CapriConfig, tmp: Path) -> None:
+    """The clone's own interpreter: one line in, one line of audio out."""
+    from capri_core.voice import clone
+
+    clip = tmp / "stub-clip.wav"
+    clip.write_bytes(wav_mod.to_wav(np.zeros(4800, dtype=np.float32), 24_000))
+    stub = tmp / "stub_worker.py"
+    stub.write_text(
+        "import base64, json, sys\n"
+        "for line in sys.stdin:\n"
+        "    json.loads(line)\n"
+        "    pcm = base64.b64encode(b'\\x00' * 4800).decode()\n"
+        "    print(json.dumps({'ok': True, 'rate': 24000, 'pcm': pcm}), flush=True)\n",
+        encoding="utf-8",
+    )
+    config.voice.reference_clip = str(clip)
+    config.voice.chatterbox_python = sys.executable
+    engine = clone.ChatterboxEngine(config)
+    original = clone.WORKER_SCRIPT
+    clone.WORKER_SCRIPT = stub
+    try:
+        check(engine.available(), f"a clip and an interpreter are enough: {engine.reason()}")
+        audio = engine.synthesize("Say it again.", voice="reference", speed=1.0)
+        check(
+            audio.sample_rate == 24_000 and audio.samples.size == 1200,
+            f"the worker's audio comes back as samples: {audio.samples.size} at {audio.sample_rate}",
+        )
+    finally:
+        clone.WORKER_SCRIPT = original
+        if engine._worker is not None:
+            engine._worker.close()
+    check(engine._worker is not None, "the worker was started for the sentence")
 
 
 async def test_reference_guard(config: CapriConfig, tmp: Path) -> None:
@@ -1248,6 +1519,105 @@ def test_pocket_engine(config: CapriConfig, tmp: Path) -> None:
     check(status.get("voiceFile") == str(tmp / "from-zip.safetensors"), "status reports the state file")
     check(status.get("voiceFileReady") is True, "status sees the installed state")
 
+    class FakePocket:
+        def generate_audio(self, state: Any, text: str):
+            t = np.arange(24_000, dtype=np.float32) / 24_000
+            return (0.05 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+
+    config.voice.dsp.pitch = 2.0
+    spoken = PocketEngine(config)
+    spoken._model = FakePocket()  # type: ignore[assignment]
+    spoken._state = object()
+    take = spoken.synthesize("x", voice="capri", speed=1.2)
+    note = _fundamental(take.samples)
+    check(
+        abs(note - 220) < 3,
+        f"the state's own register comes through, with no extra lift: {note:.0f} Hz",
+    )
+    check(take.duration_ms == 1000, f"pocket returns the take whole: {take.duration_ms} ms")
+
+    from capri_core.voice import TtsUnavailable
+
+    absent = PocketEngine(config)
+    absent.voice_file = tmp / "absent.safetensors"
+    raised = False
+    try:
+        absent.load()
+    except TtsUnavailable:
+        raised = True
+    check(raised, "loading without a voice state refuses instead of speaking")
+    spoken.load()
+    check(spoken._state is not None, "loading an already loaded engine is a no-op")
+
+
+async def test_prewarm(config: CapriConfig) -> None:
+    """The engine loads at startup, off the event loop, and never blocks it."""
+
+    class SlowEngine:
+        name = "slow"
+        sample_rate = 24_000
+        loads = 0
+        load_done = 0.0
+
+        def available(self) -> bool:
+            return True
+
+        def reason(self) -> str:
+            return ""
+
+        def voices(self) -> list[str]:
+            return ["slow"]
+
+        def load(self) -> None:
+            time.sleep(0.3)
+            SlowEngine.loads += 1
+            SlowEngine.load_done = time.monotonic()
+
+        def synthesize(self, text: str, *, voice: str, speed: float):
+            raise AssertionError("prewarm must not synthesize")
+
+    service = VoiceService(config, SlowEngine())
+    started = time.monotonic()
+    task = asyncio.create_task(service.prewarm())
+    await asyncio.sleep(0.05)
+    moved_on = time.monotonic() - started
+    check(moved_on < 0.2, f"the event loop is not held by the load: {moved_on:.2f} s")
+
+    result = await task
+    check(result.get("loaded") is True, f"prewarm reports the load: {result}")
+    check(SlowEngine.loads == 1, "the engine's load ran once")
+    check(result.get("ms", 0) >= 250, f"prewarm reports how long it took: {result.get('ms')} ms")
+
+    class Refused(SlowEngine):
+        def reason(self) -> str:
+            return "no weights here"
+
+    refused = await VoiceService(config, Refused()).prewarm()
+    check(refused.get("loaded") is False, "an unavailable engine is not warmed")
+    check("no weights here" in str(refused.get("reason")), "its reason is reported")
+
+    class NoLoad:
+        name = "noload"
+        sample_rate = 24_000
+
+        def available(self) -> bool:
+            return True
+
+        def reason(self) -> str:
+            return ""
+
+        def voices(self) -> list[str]:
+            return []
+
+    plain = await VoiceService(config, NoLoad()).prewarm()
+    check(plain.get("loaded") is False, "an engine without a load step says so")
+
+    disabled = config.model_copy(deep=True)
+    disabled.voice.enabled = False
+    off = await VoiceService(disabled, SlowEngine()).prewarm()
+    check(off.get("loaded") is False, "voice off means no load at all")
+    check(SlowEngine.loads == 1, "nothing was loaded while the voice was off")
+
 
 async def test_loop(config: CapriConfig, workspace: Path, tmp: Path) -> None:
     conn = db.open_shard("test-voice", dim=64)
@@ -1301,6 +1671,12 @@ async def main() -> int:
         await test_barge_in(VoiceService(config, ToneEngine(config)))
         print("aside vs reply")
         await test_aside_never_preempts(VoiceService(config, ToneEngine(config)))
+        print("spoken text")
+        await test_spoken_text(config_for(workspace))
+        print("cue vs reply")
+        await test_cue_never_cuts_a_reply(config_for(workspace))
+        print("hum")
+        await test_hum(config_for(workspace))
         print("wake")
         test_wake_matching()
         await test_wake_listen(config_for(workspace))
@@ -1328,10 +1704,16 @@ async def main() -> int:
         await test_unavailable(config_for(workspace), raw)
         print("clone")
         test_clone_engine(config_for(workspace), raw)
+        print("clone worker")
+        test_clone_worker(config_for(workspace), raw)
+        print("lexicon merge")
+        test_lexicon_merge(raw)
         print("reference guard")
         await test_reference_guard(config_for(workspace), raw)
         print("pocket")
         test_pocket_engine(config_for(workspace), raw)
+        print("prewarm")
+        await test_prewarm(config_for(workspace))
         print("pitch")
         test_pitch(config_for(workspace))
         print("layers")
