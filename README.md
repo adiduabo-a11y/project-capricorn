@@ -115,6 +115,8 @@ npm install                  # electron + renderer deps
 npm run dev                  # vite + electron, spawns the core automatically
 ```
 
+Code layout, the daemon/shell wire, how tests are written and packaging are in `DEVELOPMENT.md`.
+
 The shell starts `python -m capri_core` itself. To run them separately:
 
 ```powershell
