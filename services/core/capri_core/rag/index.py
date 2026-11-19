@@ -202,10 +202,11 @@ def _prepare(
     prepared.title = loaded.title
     prepared.mime = loaded.mime
     prepared.digest = _digest(loaded.text)
-    row = conn.execute(
-        "SELECT id, hash, deleted_at FROM docs WHERE collection = ? AND path = ?",
-        (collection, prepared.key),
-    ).fetchone()
+    with db.lock_for(conn):
+        row = conn.execute(
+            "SELECT id, hash, deleted_at FROM docs WHERE collection = ? AND path = ?",
+            (collection, prepared.key),
+        ).fetchone()
     if row is not None and row["hash"] == prepared.digest and row["deleted_at"] is None:
         prepared.unchanged = True
         return prepared
@@ -233,29 +234,30 @@ def _apply(
     # Upsert on the (collection, path) key: embedding is awaited between the
     # lookup and this write, so a second ingest of the same file must not race
     # into a duplicate row.
-    conn.execute(
-        "INSERT INTO docs (collection, path, title, mime, hash, mtime, indexed_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?)"
-        " ON CONFLICT(collection, path) DO UPDATE SET title = excluded.title,"
-        " mime = excluded.mime, hash = excluded.hash, mtime = excluded.mtime,"
-        " indexed_at = excluded.indexed_at, deleted_at = NULL",
-        (
-            collection,
-            prepared.key,
-            prepared.title,
-            prepared.mime,
-            prepared.digest,
-            prepared.mtime,
-            stamp,
-        ),
-    )
-    row = conn.execute(
-        "SELECT id FROM docs WHERE collection = ? AND path = ?",
-        (collection, prepared.key),
-    ).fetchone()
-    doc_id = int(row["id"]) if row is not None else 0
-    _drop_chunks(conn, doc_id)
-    return added, _store_chunks(conn, doc_id, prepared.pieces, vectors)
+    with db.transaction(conn):
+        conn.execute(
+            "INSERT INTO docs (collection, path, title, mime, hash, mtime, indexed_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(collection, path) DO UPDATE SET title = excluded.title,"
+            " mime = excluded.mime, hash = excluded.hash, mtime = excluded.mtime,"
+            " indexed_at = excluded.indexed_at, deleted_at = NULL",
+            (
+                collection,
+                prepared.key,
+                prepared.title,
+                prepared.mime,
+                prepared.digest,
+                prepared.mtime,
+                stamp,
+            ),
+        )
+        row = conn.execute(
+            "SELECT id FROM docs WHERE collection = ? AND path = ?",
+            (collection, prepared.key),
+        ).fetchone()
+        doc_id = int(row["id"]) if row is not None else 0
+        _drop_chunks(conn, doc_id)
+        return added, _store_chunks(conn, doc_id, prepared.pieces, vectors)
 
 
 async def ingest(
@@ -376,43 +378,45 @@ def prune_under(
     seen: set[str],
 ) -> int:
     """Tombstone docs under ``roots`` that were not present in this walk."""
-    rows = conn.execute(
-        "SELECT id, path FROM docs WHERE collection = ? AND deleted_at IS NULL",
-        (collection,),
-    ).fetchall()
+    with db.transaction(conn):
+        rows = conn.execute(
+            "SELECT id, path FROM docs WHERE collection = ? AND deleted_at IS NULL",
+            (collection,),
+        ).fetchall()
 
-    stamp = int(time.time() * 1000)
-    removed = 0
-    for row in rows:
-        path = str(row["path"])
-        if path in seen:
-            continue
-        if not any(_under(path, root) for root in roots):
-            continue
-        _drop_chunks(conn, int(row["id"]))
-        conn.execute("UPDATE docs SET deleted_at = ? WHERE id = ?", (stamp, int(row["id"])))
-        removed += 1
-    return removed
+        stamp = int(time.time() * 1000)
+        removed = 0
+        for row in rows:
+            path = str(row["path"])
+            if path in seen:
+                continue
+            if not any(_under(path, root) for root in roots):
+                continue
+            _drop_chunks(conn, int(row["id"]))
+            conn.execute("UPDATE docs SET deleted_at = ? WHERE id = ?", (stamp, int(row["id"])))
+            removed += 1
+        return removed
 
 
 def forget(
     conn: sqlite3.Connection, *, collection: str | None = None, path: str | None = None
 ) -> int:
     """Tombstone docs by path or collection. Returns how many were removed."""
-    sql = "SELECT id FROM docs WHERE deleted_at IS NULL"
-    params: list[object] = []
-    if collection:
-        sql += " AND collection = ?"
-        params.append(collection)
-    if path:
-        sql += " AND path = ?"
-        params.append(path)
-    rows = conn.execute(sql, params).fetchall()
-    stamp = int(time.time() * 1000)
-    for row in rows:
-        _drop_chunks(conn, int(row["id"]))
-        conn.execute("UPDATE docs SET deleted_at = ? WHERE id = ?", (stamp, int(row["id"])))
-    return len(rows)
+    with db.transaction(conn):
+        sql = "SELECT id FROM docs WHERE deleted_at IS NULL"
+        params: list[object] = []
+        if collection:
+            sql += " AND collection = ?"
+            params.append(collection)
+        if path:
+            sql += " AND path = ?"
+            params.append(path)
+        rows = conn.execute(sql, params).fetchall()
+        stamp = int(time.time() * 1000)
+        for row in rows:
+            _drop_chunks(conn, int(row["id"]))
+            conn.execute("UPDATE docs SET deleted_at = ? WHERE id = ?", (stamp, int(row["id"])))
+        return len(rows)
 
 
 def collections(conn: sqlite3.Connection) -> list[dict[str, object]]:

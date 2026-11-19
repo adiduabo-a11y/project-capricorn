@@ -19,10 +19,13 @@ await server.listen()
 const url = server.resolvedUrls?.local?.[0] ?? 'http://localhost:5273'
 console.log(`\n  project capricorn dev\n  renderer  ${url}\n  core      ws://127.0.0.1:8787\n`)
 
+const devEnv = { ...process.env, CAPRI_DEV_URL: url }
+delete devEnv.ELECTRON_RUN_AS_NODE
+
 const child = spawn(electronPath, ['.'], {
   cwd: appDir,
   stdio: 'inherit',
-  env: { ...process.env, CAPRI_DEV_URL: url },
+  env: devEnv,
 })
 
 let closing = false

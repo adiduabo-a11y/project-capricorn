@@ -169,7 +169,16 @@ class Worker:
 
     def _drain_stdout(self, stream: Any) -> None:
         try:
-            for line in iter(stream.readline, b""):
+            while True:
+                line = stream.readline(1_048_576)
+                if not line:
+                    break
+                if not line.endswith(b"\n"):
+                    while True:
+                        rest = stream.readline(1_048_576)
+                        if not rest or rest.endswith(b"\n"):
+                            break
+                    continue
                 if line.startswith(SENTINEL.encode("ascii")):
                     self._queue.put(line)
         except (OSError, ValueError):
@@ -179,10 +188,18 @@ class Worker:
 
     def _drain_stderr(self, stream: Any) -> None:
         try:
-            for line in iter(stream.readline, b""):
+            while True:
+                line = stream.readline(65_536)
+                if not line:
+                    break
+                if not line.endswith(b"\n"):
+                    while True:
+                        rest = stream.readline(65_536)
+                        if not rest or rest.endswith(b"\n"):
+                            break
                 text = line.decode("utf-8", "replace").rstrip()
                 if text:
-                    self._stderr.append(text)
+                    self._stderr.append(text[:400])
         except (OSError, ValueError):
             pass
 
@@ -205,7 +222,11 @@ class Worker:
                 process.wait(timeout=2)
             except (subprocess.TimeoutExpired, OSError):
                 pass
-            for stream in (getattr(process, "stdout", None), getattr(process, "stderr", None)):
+            for stream in (
+                getattr(process, "stdin", None),
+                getattr(process, "stdout", None),
+                getattr(process, "stderr", None),
+            ):
                 try:
                     stream.close()
                 except (AttributeError, OSError):

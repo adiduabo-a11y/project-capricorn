@@ -86,11 +86,13 @@ class _CloneWorker:
         if self._proc is not None and self._proc.poll() is None:
             return self._proc
         log.info("starting chatterbox worker: %s", self.python)
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         self._proc = subprocess.Popen(
             [str(self.python), "-u", str(self.script)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            creationflags=flags,
         )
         return self._proc
 
@@ -98,14 +100,16 @@ class _CloneWorker:
         with self._lock:
             proc = self._start()
             assert proc.stdin is not None and proc.stdout is not None
-            proc.stdin.write((json.dumps(request) + "\n").encode("utf-8"))
-            proc.stdin.flush()
-            line = proc.stdout.readline()
+            try:
+                proc.stdin.write((json.dumps(request) + "\n").encode("utf-8"))
+                proc.stdin.flush()
+                line = proc.stdout.readline()
+            except OSError as exc:
+                self.close()
+                raise TtsUnavailable(f"Chatterbox worker pipe failed: {exc}") from exc
             if not line:
                 self.close()
-                raise TtsUnavailable(
-                    "Chatterbox worker stopped without answering; see its stderr"
-                )
+                raise TtsUnavailable("Chatterbox worker stopped without answering")
             return json.loads(line.decode("utf-8"))
 
     def close(self) -> None:
@@ -227,7 +231,7 @@ class ChatterboxEngine:
         if not answer.get("ok"):
             # A worker that failed once is not restarted on the same sentence;
             # the next one starts it again with a clean model.
-            self._worker = None
+            self.close()
             raise TtsUnavailable(f"Chatterbox synthesis failed: {answer.get('error')}")
         self.device = str(answer.get("device") or "cpu")
         self.model_kind = str(answer.get("kind") or "")
@@ -238,6 +242,11 @@ class ChatterboxEngine:
         rate = int(answer.get("rate") or CHATTERBOX_SAMPLE_RATE)
         self.sample_rate = rate
         return Audio(np.ascontiguousarray(samples, dtype=np.float32), rate)
+
+    def close(self) -> None:
+        worker, self._worker = self._worker, None
+        if worker is not None:
+            worker.close()
 
 
 def render_reference(config: CapriConfig, out: Path | None = None) -> dict[str, Any]:

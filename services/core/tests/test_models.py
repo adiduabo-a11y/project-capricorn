@@ -50,6 +50,21 @@ def test_defaults() -> None:
     check("qwen" not in dump_yaml(config).lower(), "dumped config contains no Qwen names")
     check("bge-" not in dump_yaml(config).lower(), "dumped config contains no BGE names")
 
+    proj = Path(tempfile.mkdtemp(prefix="capri-proj-"))
+    try:
+        (proj / ".capri.yaml").write_text(
+            "server:\n  require_token: false\n"
+            "policy:\n  deny_paths: []\n"
+            "agent:\n  max_steps: 7\n",
+            encoding="utf-8",
+        )
+        proj_cfg = load_config(proj)
+        check(proj_cfg.server.require_token is True, "project .capri.yaml cannot disable require_token")
+        check(bool(proj_cfg.policy.deny_paths), "project .capri.yaml cannot clear deny_paths")
+        check(proj_cfg.agent.max_steps == 7, "project .capri.yaml can configure allowed agent fields")
+    finally:
+        shutil.rmtree(proj, ignore_errors=True)
+
 
 def test_wake_config() -> None:
     """The wake gate's settings: defaults, schema labels, validation."""

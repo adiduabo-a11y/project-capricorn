@@ -25,7 +25,7 @@ from .base import ToolSpec
 # A match means "ask the person", never "allow": a model can be talked into
 # anything, these cannot.
 IRREVERSIBLE: tuple[tuple[str, str], ...] = (
-    (r"\brm\s+(-[a-z]*[rf][a-z]*\s+)+/(?:\s|$)", "deletes from the filesystem root"),
+    (r"\brm\s+(-[a-z]*[rf][a-z]*\s+)+/(?:\S*(?:\s|$))", "deletes from the filesystem root"),
     (r"\brm\s+(-[a-z]*[rf][a-z]*\s+)+~", "deletes the home directory"),
     (r"--no-preserve-root", "deletes the filesystem root"),
     (r"\bmkfs(\.|\s)", "formats a filesystem"),
@@ -38,7 +38,9 @@ IRREVERSIBLE: tuple[tuple[str, str], ...] = (
     (r"\bgit\s+clean\s+-[a-z]*[fdx]", "deletes untracked work"),
     (r"\bdrop\s+(table|database)\b", "drops stored data"),
     (r"\bshutdown\b|\breboot\b", "takes the machine down"),
-    (r"\bremove-item\b[^|]*-recurse", "deletes a directory tree"),
+    (r"\b(remove-item|ri|del)\b[^|]*-(recurse|r)\b", "deletes a directory tree"),
+    (r"\b(curl|wget)\b.*\|\s*(sh|bash|zsh|pwsh|powershell)\b", "executes downloaded script"),
+    (r"\b(invoke-expression|iex)\b", "executes dynamic script"),
 )
 
 _COMPILED = tuple((re.compile(pattern, re.IGNORECASE), why) for pattern, why in IRREVERSIBLE)
@@ -103,6 +105,12 @@ class Review:
 
 def veto(name: str, args: Mapping[str, Any]) -> str | None:
     """A reason this call can never be auto-approved, whatever a model says."""
+    if name.startswith("mcp."):
+        return "third-party MCP tools require user confirmation"
+    if name == "screen.clipboard" and str(args.get("mode") or "").lower() == "read":
+        return "reading the clipboard may expose credentials"
+    if len(json.dumps(dict(args), indent=2, ensure_ascii=False)) > 2000:
+        return "arguments exceed the reviewer inspection window"
     if name == "process.close":
         # A polite close lets the app raise its own save prompt. Force does not,
         # so it is the person's decision however harmless the app looks.

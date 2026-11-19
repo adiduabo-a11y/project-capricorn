@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  core-tests:
+    name: Python Core Tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python dependencies
+        run: uv sync --locked
+      - name: Run core test suite
+        run: uv run python services/core/tests/run_all.py
+
+  desktop-checks:
+    name: Desktop Typecheck, Tests & Build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install Node dependencies
+        run: npm ci
+      - name: Typecheck renderer
+        run: npm --workspace @capri/desktop run typecheck
+      - name: Run desktop unit tests
+        run: |
+          npm --workspace @capri/desktop run test:voice
+          npm --workspace @capri/desktop run test:worklet
+      - name: Syntax check Electron scripts
+        run: |
+          node --check apps/desktop/main.mjs
+          node --check apps/desktop/preload.cjs
+          node --check apps/desktop/preload-pet.cjs
+          node --check apps/desktop/scripts/smoke-probes.mjs
+      - name: Build renderer bundle
+        run: npm --workspace @capri/desktop run build

@@ -114,15 +114,17 @@ def set_text(text: str) -> None:
         ctypes.memmove(pointer, payload, len(payload))
     finally:
         kernel32.GlobalUnlock(handle)
-    _open_clipboard(user32)
     try:
-        if not user32.EmptyClipboard():
-            raise OSError("could not empty the clipboard")
-        if not user32.SetClipboardData(CF_UNICODETEXT, handle):
-            raise OSError("could not set the clipboard")
-        # Ownership passes to the system on success.
-        handle = None
+        _open_clipboard(user32)
+        try:
+            if not user32.EmptyClipboard():
+                raise OSError("could not empty the clipboard")
+            if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+                raise OSError("could not set the clipboard")
+            # Ownership passes to the system on success.
+            handle = None
+        finally:
+            user32.CloseClipboard()
     finally:
-        user32.CloseClipboard()
         if handle:
             kernel32.GlobalFree(handle)

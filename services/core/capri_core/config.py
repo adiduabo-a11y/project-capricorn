@@ -423,7 +423,14 @@ def _default_deny_paths() -> list[str]:
     These must follow the machine: a deny list built from one user's home
     protects nothing on anyone else's.
     """
-    deny = [_roaming_appdata(), _home_path(".ssh"), "**/*.kdbx"]
+    deny = [
+        _roaming_appdata(),
+        str(paths.capri_home()),
+        _home_path(".ssh"),
+        _home_path(".aws"),
+        _home_path(".kube"),
+        "**/*.kdbx",
+    ]
     system_root = os.environ.get("SystemRoot") if os.name == "nt" else ""
     if system_root:
         deny.insert(0, system_root)
@@ -773,11 +780,21 @@ def _drop_retired_config(data: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+_PROJECT_CONFIG_SECTIONS = frozenset({"agent", "rag", "companion", "avatar"})
+
+
 def load_config(project_dir: Path | None = None) -> CapriConfig:
     data: dict[str, Any] = {}
     data = deep_merge(data, _read_yaml(paths.config_path()))
     if project_dir is not None:
-        data = deep_merge(data, _read_yaml(project_dir / ".capri.yaml"))
+        # Project configs cannot weaken policy, bind the server, or register
+        # auto-started MCP servers/executables.
+        project_overlay = {
+            key: value
+            for key, value in _read_yaml(project_dir / ".capri.yaml").items()
+            if key in _PROJECT_CONFIG_SECTIONS
+        }
+        data = deep_merge(data, project_overlay)
     data = deep_merge(data, env_overrides())
     data = _drop_retired_config(_migrate_model_config(data))
     try:

@@ -245,7 +245,10 @@ _BUILD_COMMAND = re.compile(
 
 def load_chatter(pack: str = DEFAULT_PACK) -> str:
     """The chatter pack. Only the talk path reads this; turns never do."""
-    path = packs_dir() / "prompts" / pack / "chatter.md"
+    cleaned = str(pack or "").strip()
+    if not cleaned or not re.fullmatch(r"[A-Za-z0-9_-]+", cleaned):
+        cleaned = DEFAULT_PACK
+    path = packs_dir() / "prompts" / cleaned / "chatter.md"
     try:
         return path.read_text(encoding="utf-8").strip()
     except OSError:
@@ -746,22 +749,23 @@ class Companion:
         register = select_register(snapshot, time.localtime(stamp).tm_hour)
         # Reserve the slot before the model call: two tool events can land a
         # second apart, and the spacing must hold for both of them.
+        prev_work_at = self._work_at
         self._work_at = stamp
         self._work_count += 1
         text = await self._generate(
             None, snapshot, working=True, register=register, notice=detail
         )
         if not text:
-            return self._drop_work_line(stamp, "nothing worth saying")
+            return self._drop_work_line(stamp, "nothing worth saying", prev_work_at)
         # The model call can outlive the turn. If her answer has started - or
         # the turn is over outright - the line is stale: speaking it would
         # either talk over the reply or make the voice stop the reply to make
         # room for it.
         if turn_id and turn_id == self._answer_turn:
-            return self._drop_work_line(stamp, "her answer has started")
+            return self._drop_work_line(stamp, "her answer has started", prev_work_at)
         if self.active_turns() == 0:
             return self._drop_work_line(
-                stamp, "the turn finished while she was thinking"
+                stamp, "the turn finished while she was thinking", prev_work_at
             )
         return await self._deliver(
             text,
@@ -820,6 +824,7 @@ class Companion:
         register = select_register(snapshot, time.localtime(stamp).tm_hour)
         # The slot is taken up front, so a maintenance burst cannot queue a
         # line for every pass it runs.
+        prev_work_at = self._work_at
         self._work_at = stamp
         text = await self._generate(
             None,
@@ -829,10 +834,10 @@ class Companion:
             notice=upkeep_notice(counts),
         )
         if not text:
-            self._work_at = 0.0
+            self._work_at = prev_work_at
             return self._skip("nothing worth saying", stamp)
         if self.active_turns() > 0:
-            self._work_at = 0.0
+            self._work_at = prev_work_at
             return self._skip("a turn started while she was thinking", stamp)
         return await self._deliver(
             text,
@@ -844,9 +849,11 @@ class Companion:
             preempt=False,
         )
 
-    def _drop_work_line(self, stamp: float, reason: str) -> dict[str, Any]:
+    def _drop_work_line(
+        self, stamp: float, reason: str, prev_work_at: float = 0.0
+    ) -> dict[str, Any]:
         """Give the reserved slot back: a line that is not said costs nothing."""
-        self._work_at = 0.0
+        self._work_at = prev_work_at
         self._work_count = max(0, self._work_count - 1)
         return self._skip(reason, stamp)
 

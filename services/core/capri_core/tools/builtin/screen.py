@@ -22,8 +22,6 @@ from ...screen.service import (
     observation_payload,
 )
 
-elapsed_ms_to_now = time.monotonic
-
 OBSERVE_SPEC = ToolSpec(
     name="screen.observe",
     observation="screen",
@@ -248,7 +246,7 @@ async def screen_observe(
     marks: bool = False,
     ocr: bool = False,
 ) -> ToolResult:
-    started = elapsed_ms_to_now()
+    started = time.monotonic()
     service = _service(ctx)
     if service is None:
         return ToolResult.error("screen.observe: screen control is not wired into this daemon")
@@ -317,7 +315,7 @@ async def screen_observe(
 
 
 async def screen_windows(ctx: ToolContext) -> ToolResult:
-    started = elapsed_ms_to_now()
+    started = time.monotonic()
     service = _service(ctx)
     if service is None:
         return ToolResult.error("screen.windows: screen control is not wired into this daemon")
@@ -338,7 +336,7 @@ async def screen_windows(ctx: ToolContext) -> ToolResult:
 
 
 async def screen_focus(ctx: ToolContext, *, window_id: int) -> ToolResult:
-    started = elapsed_ms_to_now()
+    started = time.monotonic()
     service = _service(ctx)
     if service is None:
         return ToolResult.error("screen.focus: screen control is not wired into this daemon")
@@ -361,7 +359,7 @@ async def screen_focus(ctx: ToolContext, *, window_id: int) -> ToolResult:
 
 
 async def screen_launch(ctx: ToolContext, *, app: str) -> ToolResult:
-    started = elapsed_ms_to_now()
+    started = time.monotonic()
     service = _service(ctx)
     if service is None:
         return ToolResult.error("screen.launch: screen control is not wired into this daemon")
@@ -389,7 +387,7 @@ async def screen_launch(ctx: ToolContext, *, app: str) -> ToolResult:
 async def screen_clipboard(
     ctx: ToolContext, *, mode: str, text: str = ""
 ) -> ToolResult:
-    started = elapsed_ms_to_now()
+    started = time.monotonic()
     service = _service(ctx)
     if service is None:
         return ToolResult.error("screen.clipboard: screen control is not wired into this daemon")
@@ -432,7 +430,7 @@ async def screen_act(
     target_name: str = "",
     expect: dict | None = None,
 ) -> ToolResult:
-    started = elapsed_ms_to_now()
+    started = time.monotonic()
     service = _service(ctx)
     if service is None:
         return ToolResult.error("screen.act: screen control is not wired into this daemon")

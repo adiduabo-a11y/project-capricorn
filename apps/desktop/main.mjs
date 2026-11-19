@@ -11,7 +11,16 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -63,6 +72,7 @@ let socket = null
 let online = false
 let helloDone = false
 let reconnectDelay = 300
+let reconnectTimer = null
 let nextId = 1
 let rendererReady = false
 let petReady = false
@@ -610,7 +620,12 @@ function startSidecar() {
     const env = { ...process.env, PYTHONUNBUFFERED: '1' }
     const packs = path.join(process.resourcesPath, 'packs')
     if (existsSync(packs)) env.CAPRI_PACKS = packs
-    sidecar = spawn(bundled, [], { cwd: home, windowsHide: true, env })
+    sidecar = spawn(bundled, [], {
+      cwd: home,
+      windowsHide: true,
+      detached: process.platform !== 'win32',
+      env,
+    })
   } else {
     if (app.isPackaged) {
       console.log('[shell] bundled capri-core is missing; run npm run sidecar')
@@ -620,6 +635,7 @@ function startSidecar() {
     sidecar = spawn('uv', ['run', 'python', '-m', 'capri_core'], {
       cwd: repoRoot,
       windowsHide: true,
+      detached: process.platform !== 'win32',
       env: { ...process.env, PYTHONUNBUFFERED: '1' },
     })
   }
@@ -719,660 +735,17 @@ function setOnline(value, detail) {
 function waitForOnline(timeoutMs = 10000) {
   if (online) return Promise.resolve()
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('daemon is not reachable')), timeoutMs)
-    onlineWaiters.push(() => {
+    const waiter = () => {
       clearTimeout(timer)
       resolve()
-    })
+    }
+    const timer = setTimeout(() => {
+      const idx = onlineWaiters.indexOf(waiter)
+      if (idx >= 0) onlineWaiters.splice(idx, 1)
+      reject(new Error('daemon is not reachable'))
+    }, timeoutMs)
+    onlineWaiters.push(waiter)
   })
-}
-
-/** Smoke mode: exit only when the UI has rendered AND a scripted turn has
- *  run a tool, asked for approval and finished. */
-async function captureFrame(name) {
-  try {
-    if (!win || win.isDestroyed()) return
-    // A transparent window captures as premultiplied alpha, which reads as
-    // blown-out when viewed naively. Paint a backdrop for the capture only.
-    win.setBackgroundColor('#201e26')
-    await new Promise((r) => setTimeout(r, 180))
-    const image = await win.webContents.capturePage()
-    writeFileSync(path.join(here, name), image.toPNG())
-    win.setBackgroundColor('#00000000')
-    console.log(`[smoke] captured ${name}`)
-  } catch (err) {
-    console.log(`[smoke] capture skipped: ${err.message}`)
-  }
-}
-
-async function probePet() {
-  try {
-    if (!petWin || petWin.isDestroyed()) return
-    const result = await petWin.webContents.executeJavaScript(`
-      (() => {
-        const actor = document.querySelector('.pet-actor')
-        const root = document.querySelector('.pet-root')
-        if (!actor || !root) return { ok: false, reason: 'missing actor' }
-        const before = actor.style.transform
-        const r = actor.getBoundingClientRect()
-        const base = {
-          bubbles: true, cancelable: true, pointerId: 77, pointerType: 'mouse',
-          isPrimary: true, button: 0, clientX: r.left + 100, clientY: r.top + 150,
-        }
-        actor.dispatchEvent(new PointerEvent('pointerdown', { ...base, buttons: 1 }))
-        actor.dispatchEvent(new PointerEvent('pointermove', {
-          ...base, buttons: 1, clientX: r.left + 145, clientY: r.top + 138,
-        }))
-        const moved = actor.style.transform
-        actor.dispatchEvent(new PointerEvent('pointerup', {
-          ...base, buttons: 0, clientX: r.left + 145, clientY: r.top + 138,
-        }))
-        return { ok: true, before, moved, state: root.dataset.state, mode: root.dataset.mode }
-      })()
-    `)
-    console.log(`[smoke] pet probe ${JSON.stringify(result)}`)
-  } catch (err) {
-    console.log(`[smoke] pet probe skipped: ${err.message}`)
-  }
-}
-
-async function probePetStates() {
-  try {
-    if (!petWin || petWin.isDestroyed()) return
-    const pause = () => new Promise((r) => setTimeout(r, 220))
-    const read = () =>
-      petWin.webContents.executeJavaScript(
-        "document.querySelector('.pet-root')?.dataset.state || ''",
-      )
-    const wait = (ms) => new Promise((r) => setTimeout(r, ms))
-    const readX = () =>
-      petWin.webContents.executeJavaScript(
-        "document.querySelector('.pet-actor')?.getBoundingClientRect().left ?? 0",
-      )
-    const readY = () =>
-      petWin.webContents.executeJavaScript(
-        "document.querySelector('.pet-actor')?.getBoundingClientRect().top ?? 0",
-      )
-    const readMode = () =>
-      petWin.webContents.executeJavaScript(
-        "document.querySelector('.pet-root')?.dataset.mode || ''",
-      )
-    const readAnchored = () =>
-      petWin.webContents.executeJavaScript(
-        "document.querySelector('.pet-root')?.dataset.anchored || ''",
-      )
-    const readFx = () =>
-      petWin.webContents.executeJavaScript(`
-        (() => {
-          const burst = document.querySelector('.teleport-burst')
-          const style = burst ? getComputedStyle(burst) : null
-          return {
-            burst: Boolean(burst),
-            sheet: style ? (style.backgroundImage.includes('click') ? 'click' : 'other') : '',
-            size: style ? style.backgroundSize : '',
-          }
-        })()
-      `)
-    const command = (name) => petWin.webContents.send('capri:pet-command', name)
-
-    await petWin.webContents.executeJavaScript(`
-      (() => {
-        const actor = document.querySelector('.pet-actor')
-        if (!actor) return
-        const r = actor.getBoundingClientRect()
-        const base = {
-          bubbles: true, cancelable: true, pointerId: 78, pointerType: 'mouse',
-          isPrimary: true, button: 0, clientX: r.left + 100, clientY: r.top + 150,
-        }
-        actor.dispatchEvent(new PointerEvent('pointerdown', { ...base, buttons: 1 }))
-        actor.dispatchEvent(new PointerEvent('pointerup', { ...base, buttons: 0 }))
-      })()
-    `)
-    await pause()
-    const clicked = await read()
-    command('dance')
-    await pause()
-    const dancing = await read()
-    command('sleep')
-    await pause()
-    const sleeping = await read()
-    command('wake')
-    await pause()
-    const waking = await read()
-
-    const beforeX = await readX()
-    command('teleport')
-    await pause()
-    const leaving = await read()
-    const leavingFx = await readFx()
-    await wait(700)
-    const arriving = await read()
-    const arrivingFx = await readFx()
-    const afterX = await readX()
-
-    // Anchor: drag her upward, release, and make sure she stays there instead
-    // of falling back to the work-area floor.
-    command('anchor')
-    await pause()
-    const anchorOn = await readAnchored()
-    await petWin.webContents.executeJavaScript(`
-      (() => {
-        const actor = document.querySelector('.pet-actor')
-        if (!actor) return
-        const r = actor.getBoundingClientRect()
-        const startY = r.top + 150
-        const endY = Math.max(60, startY - 260)
-        const base = {
-          bubbles: true, cancelable: true, pointerId: 79, pointerType: 'mouse',
-          isPrimary: true, button: 0, clientX: r.left + 100, clientY: startY,
-        }
-        actor.dispatchEvent(new PointerEvent('pointerdown', { ...base, buttons: 1 }))
-        actor.dispatchEvent(new PointerEvent('pointermove', {
-          ...base, buttons: 1, clientY: endY,
-        }))
-        actor.dispatchEvent(new PointerEvent('pointerup', {
-          ...base, buttons: 0, clientY: endY,
-        }))
-      })()
-    `)
-    await wait(80)
-    const droppedY = await readY()
-    await wait(450)
-    const anchoredY = await readY()
-    const anchoredMode = await readMode()
-    command('wander')
-    await pause()
-    const anchorOff = await readAnchored()
-    console.log(
-      `[smoke] pet states ${JSON.stringify({
-        clicked,
-        dancing,
-        sleeping,
-        waking,
-        leaving,
-        arriving,
-        leavingFx,
-        arrivingFx,
-        teleportMoved: Math.abs(afterX - beforeX) > 10,
-        anchor: {
-          enabled: anchorOn,
-          held: Math.abs(anchoredY - droppedY) < 10,
-          mode: anchoredMode,
-          released: anchorOff === 'false',
-        },
-      })}`,
-    )
-  } catch (err) {
-    console.log(`[smoke] pet states skipped: ${err.message}`)
-  }
-}
-
-/** Smoke: the microphone channel, end to end.
- *
- * The panel sends the flag through preload, the shell forwards it to the pet
- * window, the pet renderer turns it into a state and a rim light, and a pet
- * that reboots has to get it back from the snapshot. Each of those is asserted,
- * because a payload that dies in the middle looks exactly like a quiet pet.
- */
-async function probePetListening() {
-  const report = { ok: false }
-  try {
-    if (!win || win.isDestroyed() || !petWin || petWin.isDestroyed()) {
-      return { ok: false, reason: 'no windows' }
-    }
-    const settle = (ms = 260) => new Promise((r) => setTimeout(r, ms))
-    const command = (name) => petWin.webContents.send('capri:pet-command', name)
-    const read = () =>
-      petWin.webContents.executeJavaScript(`(() => {
-        const root = document.querySelector('.pet-root')
-        const avatar = document.querySelector('.pet-actor .avatar')
-        const canvas = avatar ? avatar.querySelector('canvas') : null
-        return {
-          state: (root && root.dataset.state) || '',
-          posed: (avatar && avatar.dataset.state) || '',
-          filter: canvas ? getComputedStyle(canvas).filter : '',
-        }
-      })()`)
-    // The panel side is the real bridge: preload method, IPC channel, shell.
-    const send = (on) =>
-      win.webContents.executeJavaScript(
-        `window.capri.petListening(${on ? 'true' : 'false'})`,
-      )
-    const until = async (want, tries = 14) => {
-      let seen = await read()
-      for (let i = 0; i < tries && seen.state !== want; i += 1) {
-        await settle(120)
-        seen = await read()
-      }
-      return seen
-    }
-
-    // A walk outranks listening in the state chain, so stop her first, and the
-    // run's own turn may still be speaking: talking outranks it too. The panel
-    // may also be reporting a hot microphone already, so start from off.
-    command('anchor')
-    let seen = await read()
-    for (let i = 0; i < 120 && seen.state === 'talking'; i += 1) {
-      await settle(125)
-      seen = await read()
-    }
-    await send(false)
-    const cold = await until('idle')
-
-    await send(true)
-    const hot = await until('listening')
-
-    // A pet that reboots has no memory of the channel: only the shell snapshot
-    // can bring the light back, so a missing snapshot fails here.
-    petWin.webContents.reload()
-    await settle(1200)
-    command('anchor')
-    const rebooted = await until('listening', 20)
-
-    await send(false)
-    const off = await until('idle')
-    command('wander')
-
-    Object.assign(report, { cold, hot, rebooted, off })
-    report.ok =
-      cold.state === 'idle' &&
-      !/drop-shadow/.test(cold.filter) &&
-      hot.state === 'listening' &&
-      hot.posed === 'listening' &&
-      /drop-shadow/.test(hot.filter) &&
-      rebooted.state === 'listening' &&
-      /drop-shadow/.test(rebooted.filter) &&
-      off.state === 'idle'
-  } catch (err) {
-    report.error = err.message
-  }
-  console.log(`[smoke] pet listening ${JSON.stringify(report)}`)
-  return report
-}
-
-/** Smoke: does the seated art actually appear?
- *
- * A perch is a seat, not an altitude: the art hangs below the actor box and the
- * shift is what puts her hip on the ledge. That is only checkable by eye, so
- * this drags her up, asserts the renderer chose a seated state, and leaves two
- * frames (seated idle, seated sleep) for a human to look at.
- */
-async function probePerchArt() {
-  const report = { ok: false }
-  try {
-    if (!petWin || petWin.isDestroyed()) return { ok: false, reason: 'no pet window' }
-    const settle = (ms = 300) => new Promise((r) => setTimeout(r, ms))
-    const command = (name) => petWin.webContents.send('capri:pet-command', name)
-    const read = () =>
-      petWin.webContents.executeJavaScript(`(() => {
-        const root = document.querySelector('.pet-root')
-        const avatar = document.querySelector('.pet-actor .avatar')
-        const actor = document.querySelector('.pet-actor')
-        const r = actor ? actor.getBoundingClientRect() : null
-        return {
-          state: (root && root.dataset.state) || '',
-          posed: (avatar && avatar.dataset.state) || '',
-          top: r ? Math.round(r.top) : 0,
-          transform: actor ? actor.style.transform : '',
-          innerHeight: window.innerHeight,
-        }
-      })()`)
-    const dragUp = (dy) =>
-      petWin.webContents.executeJavaScript(`(() => {
-        const actor = document.querySelector('.pet-actor')
-        if (!actor) return false
-        const r = actor.getBoundingClientRect()
-        const base = {
-          bubbles: true, cancelable: true, pointerId: 91, pointerType: 'mouse',
-          isPrimary: true, button: 0, clientX: r.left + 100, clientY: r.top + 150,
-        }
-        actor.dispatchEvent(new PointerEvent('pointerdown', { ...base, buttons: 1 }))
-        actor.dispatchEvent(new PointerEvent('pointermove', {
-          ...base, buttons: 1, clientY: r.top + 150 - ${dy},
-        }))
-        actor.dispatchEvent(new PointerEvent('pointerup', {
-          ...base, buttons: 0, clientY: r.top + 150 - ${dy},
-        }))
-        return true
-      })()`)
-
-    command('anchor')
-    await settle(400)
-    const before = await read()
-    await dragUp(300)
-    await settle(700)
-    const perched = await read()
-    await capturePetFrame('.smoke-perch.png')
-
-    // Her legs hang below the actor box. Both the window's hit test and the DOM
-    // have to reach them, or a real click goes to the desktop behind her.
-    const box = await petWin.webContents.executeJavaScript(`(() => {
-      const actor = document.querySelector('.pet-actor')
-      if (!actor) return null
-      const r = actor.getBoundingClientRect()
-      return { left: r.left, top: r.top, width: r.width, height: r.height }
-    })()`)
-    const legX = Math.round(box.left + box.width / 2)
-    const legY = Math.round(box.top + box.height + 120)
-    // Real input, not synthetic DOM events: sendInputEvent goes through the same
-    // hit test the operating system's click does, so it can tell whether the
-    // window is still click-through where her legs are.
-    const moveTo = async (x, y, want) => {
-      for (let i = 0; i < 8; i += 1) {
-        petWin.webContents.sendInputEvent({ type: 'mouseMove', x, y })
-        await settle(80)
-        if (petPointerInteractive === want) return true
-      }
-      return false
-    }
-    const legsReachable = await moveTo(legX, legY, true)
-    const perchedAttr = await petWin.webContents.executeJavaScript(
-      "document.querySelector('.pet-actor')?.dataset.perched || ''",
-    )
-    // Away from her the window has to go back to click-through, or the strip
-    // would eat desktop clicks.
-    const awayClear = await moveTo(12, 12, false)
-    const legTarget = await petWin.webContents.executeJavaScript(
-      `(() => {
-        const el = document.elementFromPoint(${legX}, ${legY})
-        return el ? String(el.className || el.tagName) : ''
-      })()`,
-    )
-    // Grab her by the legs and lift: the same gesture a person would make.
-    petWin.webContents.sendInputEvent({ type: 'mouseMove', x: legX, y: legY })
-    await settle(120)
-    petWin.webContents.sendInputEvent({
-      type: 'mouseDown', x: legX, y: legY, button: 'left', clickCount: 1,
-    })
-    await settle(120)
-    petWin.webContents.sendInputEvent({
-      type: 'mouseMove', x: legX, y: legY - 90, button: 'left',
-    })
-    await settle(160)
-    petWin.webContents.sendInputEvent({
-      type: 'mouseUp', x: legX, y: legY - 90, button: 'left', clickCount: 1,
-    })
-    await settle(500)
-    const lifted = await read()
-
-    command('sleep')
-    await settle(700)
-    const asleep = await read()
-    await capturePetFrame('.smoke-perch-sleep.png')
-
-    command('wake')
-    await settle(500)
-    command('wander')
-
-    Object.assign(report, { before, perched, legs: {
-      x: legX, y: legY, reachable: legsReachable, perchedAttr,
-      awayClear, target: legTarget, liftedTop: lifted.top,
-    }, asleep })
-    report.ok =
-      perched.posed.startsWith('perched') &&
-      asleep.posed === 'perched_sleeping' &&
-      legsReachable === true &&
-      awayClear === true &&
-      legTarget.includes('pet-actor') &&
-      lifted.top < perched.top - 10
-  } catch (err) {
-    report.error = err.message
-  }
-  console.log(`[smoke] perch art ${JSON.stringify(report)}`)
-  return report
-}
-
-async function probeMicRouteUi() {
-  try {
-    if (!win || win.isDestroyed()) return
-    await win.webContents.executeJavaScript(`
-      (() => {
-        const tab = [...document.querySelectorAll('.rail-tab')]
-          .find((node) => node.textContent.includes('MAINFRAME'))
-        tab?.click()
-        return Boolean(tab)
-      })()
-    `)
-    await waitForRenderer(`!!document.querySelector('.mic-route')`, 2000)
-    const result = await win.webContents.executeJavaScript(`
-      (() => {
-        const section = document.querySelector('.mic-route')
-        return {
-          present: Boolean(section),
-          title: section?.querySelector('.mic-route-title')?.textContent || '',
-          phase: section?.dataset.phase || '',
-          toggle: Boolean(section?.querySelector('input[type=checkbox]')),
-          selects: section?.querySelectorAll('select').length || 0,
-        }
-      })()
-    `)
-    console.log(`[smoke] mic route ${JSON.stringify(result)}`)
-  } catch (err) {
-    console.log(`[smoke] mic route probe skipped: ${err.message}`)
-  }
-}
-
-async function probeBubble() {
-  try {
-    if (!win || win.isDestroyed()) return
-    await win.webContents.executeJavaScript("window.capri.setUiMode('bubble')")
-    await waitForRenderer(`!!document.querySelector('.qb-card')`, 2000)
-    const result = await win.webContents.executeJavaScript(`
-      (() => {
-        const card = document.querySelector('.qb-card')
-        if (!card) return { present: false }
-        return {
-          present: true,
-          side: card.closest('.bubble-shell')?.dataset.side || '',
-          messages: card.querySelectorAll('.qb-msg').length,
-          input: Boolean(card.querySelector('textarea')),
-          actions: card.querySelectorAll('.qb-icon').length,
-        }
-      })()
-    `)
-    const bubbleBounds = win.getBounds()
-    console.log(
-      `[smoke] bubble ${JSON.stringify({
-        ...result,
-        window: { width: bubbleBounds.width, height: bubbleBounds.height },
-        resizable: win.isResizable(),
-      })}`,
-    )
-
-    // The expand control uses the same bridge path; verify the console comes
-    // back and the window regains its full size.
-    await win.webContents.executeJavaScript("window.capri.setUiMode('panel')")
-    const expanded = await waitForRenderer(`!!document.querySelector('.shell')`, 2000)
-    const panelBounds = win.getBounds()
-    console.log(
-      `[smoke] bubble expand ${JSON.stringify({
-        expanded,
-        window: { width: panelBounds.width, height: panelBounds.height },
-        resizable: win.isResizable(),
-      })}`,
-    )
-  } catch (err) {
-    console.log(`[smoke] bubble probe skipped: ${err.message}`)
-  }
-}
-
-async function capturePetFrame(name) {
-  try {
-    if (!petWin || petWin.isDestroyed()) return
-    // A transparent capture loses the sprite against the alpha checker; use a
-    // temporary smoke-only backdrop, then put the window back to transparent.
-    petWin.setBackgroundColor('#201e26')
-    await new Promise((r) => setTimeout(r, 180))
-    const image = await petWin.webContents.capturePage()
-    writeFileSync(path.join(here, name), image.toPNG())
-    petWin.setBackgroundColor('#00000000')
-    console.log(`[smoke] captured ${name}`)
-  } catch (err) {
-    console.log(`[smoke] pet capture skipped: ${err.message}`)
-  }
-}
-
-/**
- * Every pose at the pack's character scale: walk, the drag dangle, dance, the
- * held sleep cell, the wake burst and the leave burst. Each shot records the
- * actor and canvas rects so the capture can be checked for clipping at the
- * canvas edge, and the visor size so the poses can be compared to the perch.
- */
-async function probePoseScale() {
-  const pause = (ms) => new Promise((r) => setTimeout(r, ms))
-  const readState = () =>
-    petWin.webContents.executeJavaScript(
-      "document.querySelector('.pet-root')?.dataset.state || ''",
-    )
-  const geometry = () =>
-    petWin.webContents.executeJavaScript(`(() => {
-      const actor = document.querySelector('.pet-actor')
-      const canvas = document.querySelector('.pet-actor .avatar canvas')
-      if (!actor || !canvas) return null
-      const a = actor.getBoundingClientRect()
-      const c = canvas.getBoundingClientRect()
-      return {
-        state: document.querySelector('.pet-root')?.dataset.state || '',
-        posed: document.querySelector('.pet-actor .avatar')?.dataset.state || '',
-        actor: [Math.round(a.left), Math.round(a.top), Math.round(a.width), Math.round(a.height)],
-        canvas: [Math.round(c.left), Math.round(c.top), Math.round(c.width), Math.round(c.height)],
-      }
-    })()`)
-  const command = (name) => petWin.webContents.send('capri:pet-command', name)
-  const waitState = async (name, timeout = 3000) => {
-    const deadline = Date.now() + timeout
-    while (Date.now() < deadline) {
-      if ((await readState()) === name) return true
-      await pause(60)
-    }
-    return false
-  }
-  // The reachable region has to follow the drawn art, not the actor box: a fixed
-  // box left a wide strip of desktop dead behind her hair.
-  const wideHits = []
-  const shoot = async (name, note) => {
-    const info = await geometry()
-    const hit = await petWin.webContents.executeJavaScript(
-      "document.querySelector('.pet-actor')?.dataset.hit ?? ''",
-    )
-    const width = Number(String(hit).split(',')[2])
-    if (!(width > 0) || width > 310) wideHits.push(`${name}:${hit || 'none'}`)
-    await capturePetFrame(`.smoke-pose-${name}.png`)
-    console.log(`[smoke] pose ${name} ${JSON.stringify({ ...info, hit, ...note })}`)
-  }
-
-  try {
-    if (!petWin || petWin.isDestroyed()) return { ok: false }
-
-    // The perch probe leaves her asleep on the ledge; a forced sleep keeps the
-    // wander loop from ever starting a walk, so wake her first.
-    command('wake')
-    await waitState('waking', 2000)
-    await pause(1200)
-    command('anchor')
-    await pause(250)
-    // She picks a target on her own clock, so nudge the wander loop until she
-    // is actually walking rather than trusting one command to land in time.
-    let walking = false
-    // Most of her moves are teleports or hops, so this waits out a few idle
-    // holds rather than assuming the first nudge produces a walk.
-    const walkDeadline = Date.now() + 20_000
-    while (!walking && Date.now() < walkDeadline) {
-      command('wander')
-      walking = await waitState('walking', 2500)
-    }
-    await pause(120)
-    await shoot('walk', { seen: walking })
-
-    // Drag art: hold her high on the body so the pointer is on the sprite, not
-    // the floor strip, and lift a little to arm the mode.
-    command('anchor')
-    await pause(250)
-    const g = await geometry()
-    const gripX = Math.round(g.actor[0] + g.actor[2] / 2)
-    const gripY = Math.round(g.actor[1] + g.actor[3] * 0.3)
-    petWin.webContents.sendInputEvent({ type: 'mouseMove', x: gripX, y: gripY })
-    await pause(120)
-    petWin.webContents.sendInputEvent({ type: 'mouseDown', x: gripX, y: gripY, button: 'left', clickCount: 1 })
-    await pause(150)
-    petWin.webContents.sendInputEvent({ type: 'mouseMove', x: gripX, y: gripY - 40, button: 'left' })
-    const dragging = await waitState('dragging', 2000)
-    await pause(150)
-    await shoot('drag', { seen: dragging })
-    petWin.webContents.sendInputEvent({ type: 'mouseUp', x: gripX, y: gripY - 40, button: 'left', clickCount: 1 })
-    await pause(500)
-
-    command('anchor')
-    await pause(200)
-    command('dance')
-    const dancing = await waitState('dancing', 3000)
-    await pause(250)
-    await shoot('dance', { seen: dancing })
-
-    command('sleep')
-    const sleeping = await waitState('sleeping', 3000)
-    await pause(350)
-    await shoot('sleep', { seen: sleeping })
-
-    command('wake')
-    const waking = await waitState('waking', 3000)
-    await pause(100)
-    await shoot('wake', { seen: waking })
-
-    // The leave burst is the widest art in the pack. The window also paints its
-    // own click burst and ribbon on top of it, and those reach across the whole
-    // screen, so hide every overlay in the pet root: what is left is the sprite
-    // canvas, which is what has to fit.
-    await pause(900)
-    const hideOverlays = () =>
-      petWin.webContents.executeJavaScript(`(() => {
-        const stray = document.querySelectorAll(
-          '.pet-root > *:not(.pet-actor), .teleport-burst, [class*="ribbon"], [class*="burst"]',
-        )
-        for (const node of stray) node.style.setProperty('visibility', 'hidden')
-        return stray.length
-      })()`)
-    command('teleport')
-    const leaving = await waitState('leaving', 3000)
-    const hidden = await hideOverlays()
-    await pause(50)
-    await shoot('leave', { seen: leaving })
-    console.log(`[smoke] leave overlays hidden: ${hidden}`)
-
-    await petWin.webContents.executeJavaScript(`(() => {
-      const root = document.querySelector('.pet-root')
-      if (!root) return
-      for (const child of root.children) child.style.removeProperty('visibility')
-    })()`)
-
-    await pause(1400)
-    command('anchor')
-    await pause(400)
-    // Walking is the one state she picks on her own dice, so it is reported but
-    // does not fail the run; the rest are driven by commands.
-    return {
-      ok: dragging && dancing && waking && leaving && wideHits.length === 0,
-      walking,
-      dragging,
-      dancing,
-      waking,
-      leaving,
-      wideHits,
-    }
-  } catch (err) {
-    return { ok: false, error: err.message }
-  }
-}
-
-async function waitForRenderer(probe, timeoutMs = 6000) {
-  if (!win || win.isDestroyed()) return false
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const ok = await win.webContents.executeJavaScript(probe).catch(() => false)
-    if (ok) return true
-    await new Promise((r) => setTimeout(r, 120))
-  }
-  return false
 }
 
 let finishing = false
@@ -1384,52 +757,24 @@ function finishSmoke(code) {
   setTimeout(() => app.exit(code), 200)
 }
 
+async function captureSmokeFrame(name) {
+  if (!isSmoke) return
+  const mod = await import('./scripts/smoke-probes.mjs')
+  await mod.captureFrame(win, here, name)
+}
+
 async function maybeFinishSmoke() {
   if (!isSmoke || finishing) return
   if (!smoke.ui || !smoke.pet || !smoke.turn || smoke.tools < 2 || !smoke.confirm) return
   finishing = true
-
-  // Events arrive before React paints. Wait for the trace to actually contain
-  // both tool chips, no pending approval, and a finished assistant message —
-  // otherwise the capture is a picture of the previous frame.
-  const settled = await waitForRenderer(`
-    !!document.querySelector('.msg.assistant p') &&
-    document.querySelector('.msg.assistant p').innerText.length > 8 &&
-    !document.querySelector('.confirm') &&
-    document.querySelectorAll('.tool').length >= 2
-  `)
-  if (!settled) {
-    console.log('[smoke] trace did not settle')
-    finishSmoke(1)
-    return
-  }
-
-  await probePet()
-  await captureFrame('.smoke.png')
-  await capturePetFrame('.smoke-pet.png')
-  await probePetStates()
-  const listening = await probePetListening()
-  if (!listening.ok) {
-    console.log('[smoke] pet listening failed')
-    finishSmoke(1)
-    return
-  }
-  const perch = await probePerchArt()
-  if (!perch.ok) {
-    console.log('[smoke] perch art failed')
-    finishSmoke(1)
-    return
-  }
-  const poses = await probePoseScale()
-  if (!poses.ok) {
-    console.log(`[smoke] pose scale failed ${JSON.stringify(poses)}`)
-    finishSmoke(1)
-    return
-  }
-  await probeMicRouteUi()
-  await probeBubble()
-  console.log('[smoke] ok')
-  finishSmoke(0)
+  const mod = await import('./scripts/smoke-probes.mjs')
+  await mod.runSmokeSuite({
+    win,
+    petWin,
+    outDir: here,
+    finishSmoke,
+    getPetPointerInteractive: () => petPointerInteractive,
+  })
 }
 
 function connect() {
@@ -1502,7 +847,7 @@ function connect() {
         if (msg.type === 'agent.tool') smoke.tools += 1
         if (msg.type === 'agent.confirm') {
           smoke.confirm = true
-          void captureFrame('.smoke-confirm.png')
+          void captureSmokeFrame('.smoke-confirm.png')
           request('confirm.respond', { confirmId: msg.confirmId, approved: true }).catch(
             (err) => {
               console.error(`[smoke] confirm failed: ${err.message}`)
@@ -1521,8 +866,18 @@ function connect() {
   ws.on('close', () => {
     socket = null
     helloDone = false
+    for (const [id, entry] of pending.entries()) {
+      clearTimeout(entry.timer)
+      entry.reject(new Error('daemon connection closed'))
+      pending.delete(id)
+    }
     setOnline(false, 'closed')
-    setTimeout(connect, reconnectDelay)
+    if (quitting) return
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      connect()
+    }, reconnectDelay)
     reconnectDelay = Math.min(reconnectDelay * 2, 5000)
   })
 
@@ -1543,7 +898,13 @@ function request(method, params = {}, timeoutMs = 30000) {
       reject(new Error(`${method} timed out`))
     }, timeoutMs)
     pending.set(id, { resolve, reject, timer })
-    socket.send(JSON.stringify({ id, method, params }))
+    try {
+      socket.send(JSON.stringify({ id, method, params }))
+    } catch (err) {
+      clearTimeout(timer)
+      pending.delete(id)
+      reject(err instanceof Error ? err : new Error(String(err)))
+    }
   })
 }
 
@@ -1558,16 +919,67 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true } },
 ])
 
+const PROD_CSP =
+  "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: app:; font-src 'self' data:; media-src 'self' blob: mediastream:; connect-src 'self'; base-uri 'none'; form-action 'none';"
+
+function devCsp() {
+  if (!devUrl) return PROD_CSP
+  const origin = new URL(devUrl).origin
+  const wsOrigin = origin.replace(/^http/, 'ws')
+  return `default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: app:; font-src 'self' data:; media-src 'self' blob: mediastream:; connect-src 'self' ${origin} ${wsOrigin}; base-uri 'none'; form-action 'none';`
+}
+
+function isAllowedAppUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl)
+    if (devUrl) return parsed.origin === new URL(devUrl).origin
+    return parsed.protocol === 'app:' && parsed.hostname === 'capri'
+  } catch {
+    return false
+  }
+}
+
+function guardNavigation(contents) {
+  contents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//.test(url)) shell.openExternal(url)
+    return { action: 'deny' }
+  })
+  contents.on('will-navigate', (event, url) => {
+    if (!isAllowedAppUrl(url)) event.preventDefault()
+  })
+}
+
 function registerAppProtocol() {
-  protocol.handle('app', (req) => {
+  protocol.handle('app', async (req) => {
     const { pathname } = new URL(req.url)
     const rel = decodeURIComponent(pathname).replace(/^\/+/, '') || 'index.html'
-    const target = path.normalize(path.join(DIST, rel))
-    if (!target.startsWith(path.normalize(DIST))) {
+    const target = path.resolve(DIST, rel)
+    const relative = path.relative(DIST, target)
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
       return new Response('forbidden', { status: 403 })
     }
     if (!existsSync(target)) return new Response('not found', { status: 404 })
-    return net.fetch(pathToFileURL(target).toString())
+    const resp = await net.fetch(pathToFileURL(target).toString())
+    const headers = new Headers(resp.headers)
+    headers.set('Content-Security-Policy', PROD_CSP)
+    return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers })
+  })
+}
+
+function configureDevCsp() {
+  if (!devUrl) return
+  const csp = devCsp()
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    if (isAllowedAppUrl(details.url)) {
+      callback({
+        responseHeaders: {
+          ...details.responseHeaders,
+          'Content-Security-Policy': [csp],
+        },
+      })
+      return
+    }
+    callback({ responseHeaders: details.responseHeaders })
   })
 }
 
@@ -1594,10 +1006,10 @@ function createWindow() {
     backgroundColor: '#00000000',
     title: APP_NAME,
     webPreferences: {
-      preload: path.join(here, 'preload.mjs'),
+      preload: path.join(here, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       spellcheck: false,
       // The bubble and speech player must keep running while hidden.
       backgroundThrottling: false,
@@ -1627,10 +1039,7 @@ function createWindow() {
     updateTray()
   })
 
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//.test(url)) shell.openExternal(url)
-    return { action: 'deny' }
-  })
+  guardNavigation(win.webContents)
 
   win.webContents.on('console-message', (...args) => {
     const detail = args[1]
@@ -1728,10 +1137,10 @@ function createPetWindow() {
     backgroundColor: '#00000000',
     title: APP_NAME,
     webPreferences: {
-      preload: path.join(here, 'preload.mjs'),
+      preload: path.join(here, 'preload-pet.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       spellcheck: false,
       // She keeps walking while another app has focus.
       backgroundThrottling: false,
@@ -1747,10 +1156,7 @@ function createPetWindow() {
     petWin.showInactive()
   })
 
-  petWin.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//.test(url)) shell.openExternal(url)
-    return { action: 'deny' }
-  })
+  guardNavigation(petWin.webContents)
 
   petWin.webContents.on('console-message', (...args) => {
     const detail = args[1]
@@ -1782,14 +1188,73 @@ function createPetWindow() {
 
 // --------------------------------------------------------------------------- ipc
 
-ipcMain.handle('capri:call', async (_event, method, params) => {
+function isPanelSender(event) {
+  return Boolean(win && !win.isDestroyed() && event.sender === win.webContents)
+}
+
+function isPetSender(event) {
+  return Boolean(petWin && !petWin.isDestroyed() && event.sender === petWin.webContents)
+}
+
+function requirePanelSender(event) {
+  if (!isPanelSender(event)) throw new Error('unauthorized ipc sender')
+}
+
+const EXECUTABLE_EXTS = new Set([
+  '.exe', '.bat', '.cmd', '.com', '.msi', '.msp', '.vbs', '.vbe',
+  '.js', '.jse', '.wsf', '.wsh', '.ps1', '.psm1', '.lnk', '.scr',
+  '.hta', '.cpl', '.reg', '.dll', '.pif', '.jar',
+])
+
+function resolveCodeBinary() {
+  if (process.platform !== 'win32') return 'code'
+  const found = spawnSync('where.exe', ['code'], { windowsHide: true, encoding: 'utf8' })
+  if (found.status !== 0 || !found.stdout) return null
+  for (const rawLine of found.stdout.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+    const lower = line.toLowerCase()
+    if (lower.endsWith('.exe')) return line
+    if (lower.endsWith('.cmd') || lower.endsWith('.bat')) {
+      const exe = path.resolve(path.dirname(line), '..', 'Code.exe')
+      if (existsSync(exe)) return exe
+    }
+  }
+  return null
+}
+
+function lineAtOffset(file, offset) {
+  const maxBytes = 2_000_000
+  const cap = Math.min(Math.max(0, Math.floor(offset)), maxBytes)
+  if (cap <= 0) return 1
+  const fd = openSync(file, 'r')
+  try {
+    const size = Math.min(statSync(file).size, cap)
+    if (size <= 0) return 1
+    const buf = Buffer.allocUnsafe(size)
+    const read = readSync(fd, buf, 0, size, 0)
+    let lines = 1
+    for (let i = 0; i < read; i += 1) {
+      if (buf[i] === 10) lines += 1
+    }
+    return lines
+  } finally {
+    closeSync(fd)
+  }
+}
+
+ipcMain.handle('capri:call', async (event, method, params) => {
+  requirePanelSender(event)
   if (typeof method !== 'string') throw new Error('method must be a string')
   return call(method, params || {})
 })
 
 // The panel's wake chip goes through the shell, so the tray cannot disagree
 // with it: one path toggles, one event comes back.
-ipcMain.handle('capri:toggle-wake', () => toggleWake())
+ipcMain.handle('capri:toggle-wake', (event) => {
+  requirePanelSender(event)
+  return toggleWake()
+})
 
 // The renderer read the config; the tray follows it rather than the reverse.
 ipcMain.on('capri:wake-state', (event, enabled) => {
@@ -1801,9 +1266,11 @@ ipcMain.on('capri:wake-state', (event, enabled) => {
 /**
  * Open a document at a character offset. A citation is a character span, so
  * the shell turns it into a line number and asks VS Code for it; if there is
- * no `code` on PATH, the OS association is still a useful answer.
+ * no `code` on PATH, the OS association is still a useful answer for
+ * non-executable files.
  */
-ipcMain.handle('capri:open-file', async (_event, target, offset) => {
+ipcMain.handle('capri:open-file', async (event, target, offset) => {
+  requirePanelSender(event)
   if (typeof target !== 'string' || !target.trim()) throw new Error('path must be a string')
   const file = path.resolve(target)
   if (!existsSync(file)) throw new Error(`file not found: ${file}`)
@@ -1811,26 +1278,37 @@ ipcMain.handle('capri:open-file', async (_event, target, offset) => {
   let line = 1
   if (typeof offset === 'number' && offset > 0) {
     try {
-      const text = readFileSync(file, 'utf8')
-      line = text.slice(0, Math.min(offset, text.length)).split('\n').length
+      line = lineAtOffset(file, offset)
     } catch {
       line = 1
     }
   }
+
+  const ext = path.extname(file).toLowerCase()
+  const codeBin = resolveCodeBinary()
 
   await new Promise((resolve) => {
     let settled = false
     const fallback = () => {
       if (settled) return
       settled = true
+      if (EXECUTABLE_EXTS.has(ext)) {
+        shell.showItemInFolder(file)
+        resolve()
+        return
+      }
       void shell.openPath(file).finally(resolve)
+    }
+    if (!codeBin) {
+      fallback()
+      return
     }
     let child
     try {
-      child = spawn('code', ['-g', `${file}:${line}`], {
+      child = spawn(codeBin, ['-g', `${file}:${line}`], {
         windowsHide: true,
         stdio: 'ignore',
-        shell: true,
+        shell: false,
       })
     } catch {
       fallback()
@@ -1876,23 +1354,29 @@ ipcMain.handle('capri:choose-folder', async (event, title) => {
   return result.filePaths[0]
 })
 
-ipcMain.handle('capri:info', async () => ({
-  online,
-  coreUrl,
-  devUrl: !!devUrl,
-  platform: process.platform,
-  screenPaused,
-  speechMuted,
-  versions: {
-    electron: process.versions.electron,
-    chrome: process.versions.chrome,
-    node: process.versions.node,
-  },
-}))
+ipcMain.handle('capri:info', async (event) => {
+  requirePanelSender(event)
+  return {
+    online,
+    coreUrl,
+    devUrl: !!devUrl,
+    platform: process.platform,
+    screenPaused,
+    speechMuted,
+    versions: {
+      electron: process.versions.electron,
+      chrome: process.versions.chrome,
+      node: process.versions.node,
+    },
+  }
+})
 
-ipcMain.handle('capri:window', async (_event, action) => {
+ipcMain.handle('capri:window', async (event, action) => {
   if (!['minimize', 'hide', 'close', 'toggle', 'show'].includes(action)) {
     throw new Error(`unknown window action: ${action}`)
+  }
+  if (!isPanelSender(event) && !(isPetSender(event) && action === 'show')) {
+    throw new Error('unauthorized ipc sender')
   }
   windowControl(action)
 })
@@ -2093,12 +1577,50 @@ function updatesSupported() {
   return existsSync(path.join(process.resourcesPath, 'app-update.yml'))
 }
 
+let updaterConfigured = false
+
 async function loadUpdater() {
-  if (autoUpdate) return autoUpdate
-  // Loaded lazily: constructing the updater needs a ready electron app, and a
-  // dev run should never pay for it.
-  const mod = await import('electron-updater')
-  autoUpdate = (mod.default ?? mod).autoUpdater ?? mod.autoUpdater
+  if (!autoUpdate) {
+    // Loaded lazily: constructing the updater needs a ready electron app, and a
+    // dev run should never pay for it.
+    const mod = await import('electron-updater')
+    autoUpdate = (mod.default ?? mod).autoUpdater ?? mod.autoUpdater
+  }
+  if (!updaterConfigured) {
+    updaterConfigured = true
+    autoUpdate.autoDownload = true
+    // Downloaded and quiet: the installer runs when she quits, or immediately if
+    // the person asks for the restart.
+    autoUpdate.autoInstallOnAppQuit = true
+    autoUpdate.allowDowngrade = false
+    autoUpdate.logger = {
+      info() {},
+      debug() {},
+      warn: (...args) => console.warn('[update]', ...args),
+      error: (...args) => console.error('[update]', ...args),
+    }
+    autoUpdate.on('checking-for-update', () =>
+      publishUpdate({ status: 'checking', progress: 0, error: '' }),
+    )
+    autoUpdate.on('update-available', (info) =>
+      publishUpdate({ status: 'available', version: String(info?.version || ''), progress: 0 }),
+    )
+    autoUpdate.on('update-not-available', () =>
+      publishUpdate({ status: 'current', version: app.getVersion(), progress: 0 }),
+    )
+    autoUpdate.on('download-progress', (progress) =>
+      publishUpdate({
+        status: 'downloading',
+        progress: Math.max(0, Math.min(100, Number(progress?.percent) || 0)),
+      }),
+    )
+    autoUpdate.on('update-downloaded', (info) =>
+      publishUpdate({ status: 'ready', version: String(info?.version || ''), progress: 100 }),
+    )
+    autoUpdate.on('error', (err) =>
+      publishUpdate({ status: 'error', error: String(err?.message || err).slice(0, 300) }),
+    )
+  }
   return autoUpdate
 }
 
@@ -2115,42 +1637,20 @@ async function setupUpdates() {
     updateState = { ...updateState, status: 'unsupported' }
     return
   }
-  const updater = await loadUpdater()
-  updater.autoDownload = true
-  // Downloaded and quiet: the installer runs when she quits, or immediately if
-  // the person asks for the restart.
-  updater.autoInstallOnAppQuit = true
-  updater.allowDowngrade = false
-  updater.logger = { info() {}, warn() {}, error() {}, debug() {} }
-  updater.on('checking-for-update', () => publishUpdate({ status: 'checking', progress: 0, error: '' }))
-  updater.on('update-available', (info) =>
-    publishUpdate({ status: 'available', version: String(info?.version || ''), progress: 0 }),
-  )
-  updater.on('update-not-available', () =>
-    publishUpdate({ status: 'current', version: app.getVersion(), progress: 0 }),
-  )
-  updater.on('download-progress', (progress) =>
-    publishUpdate({
-      status: 'downloading',
-      progress: Math.max(0, Math.min(100, Number(progress?.percent) || 0)),
-    }),
-  )
-  updater.on('update-downloaded', (info) =>
-    publishUpdate({ status: 'ready', version: String(info?.version || ''), progress: 100 }),
-  )
-  updater.on('error', (err) =>
-    publishUpdate({ status: 'error', error: String(err?.message || err).slice(0, 300) }),
-  )
-
+  await loadUpdater()
   console.log(`[update] checking for a newer release (on ${app.getVersion()})`)
   void checkForUpdates()
   updateTimer = setInterval(() => void checkForUpdates(), UPDATE_INTERVAL_MS)
   updateTimer.unref?.()
 }
 
-ipcMain.handle('capri:update-state', () => updateState)
+ipcMain.handle('capri:update-state', (event) => {
+  requirePanelSender(event)
+  return updateState
+})
 
-ipcMain.handle('capri:update-check', async () => {
+ipcMain.handle('capri:update-check', async (event) => {
+  requirePanelSender(event)
   if (!updatesSupported()) return updateState
   if (updateState.status === 'downloading' || updateState.status === 'ready') return updateState
   publishUpdate({ status: 'checking', error: '' })
@@ -2158,7 +1658,8 @@ ipcMain.handle('capri:update-check', async () => {
   return updateState
 })
 
-ipcMain.handle('capri:update-install', async () => {
+ipcMain.handle('capri:update-install', async (event) => {
+  requirePanelSender(event)
   if (updateState.status !== 'ready') throw new Error('no update is ready to install')
   const updater = await loadUpdater()
   // Silent, then relaunch: an assisted installer would otherwise sit waiting
@@ -2169,6 +1670,7 @@ ipcMain.handle('capri:update-install', async () => {
 
 app.whenReady().then(() => {
   registerAppProtocol()
+  configureDevCsp()
   configureAudioPermissions()
   startSidecar()
   createWindow()
@@ -2201,6 +1703,10 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   quitting = true
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
   globalShortcut.unregisterAll()
   saveBounds()
   stopSidecar()

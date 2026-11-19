@@ -111,7 +111,7 @@ class MemoryService:
                 observations=observations,
                 episode_id=episode_id,
                 source_msg=source_msg,
-                workspace_id=workspace_id or None,
+                workspace_id=workspace_id,
             )
         except Exception:
             log.exception("memory writer failed; turn is unaffected")

@@ -74,7 +74,8 @@ def export_shard(
         copy = Path(raw) / DATABASE
         snapshot = sqlite3.connect(copy)
         try:
-            conn.backup(snapshot)
+            with db.lock_for(conn):
+                conn.backup(snapshot)
             schema_version = _schema_version(snapshot)
             counts = _counts(snapshot)
         finally:
@@ -180,8 +181,12 @@ def import_shard(
         with tempfile.TemporaryDirectory(prefix="capri-import-") as raw:
             copy = Path(raw) / DATABASE
             digest = hashlib.sha256()
+            written = 0
             with bundle.open(DATABASE) as src, copy.open("wb") as dst:
                 for chunk in iter(lambda: src.read(1024 * 1024), b""):
+                    written += len(chunk)
+                    if written > MAX_BUNDLE_BYTES:
+                        raise ShardError("shard.db is too large")
                     digest.update(chunk)
                     dst.write(chunk)
             if manifest.get("sha256") and digest.hexdigest() != manifest["sha256"]:
@@ -205,18 +210,17 @@ def import_shard(
                     "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'episodes'"
                 ).fetchone() is None:
                     raise ShardError("shard.db is missing the episodes table")
-                imported.backup(conn)
+                with db.lock_for(conn):
+                    imported.backup(conn)
+                    version = db.migrate(conn)
+                    from .vector import ensure_vector_tables
+
+                    ensure_vector_tables(conn, int(config.models.embed.dim))
+                    db.set_meta(conn, "schema_version", str(version))
+                    result = dict(manifest)
+                    result["counts"] = _counts(conn)
             finally:
                 imported.close()
 
-    # Older bundles are upgraded in place; an imported vector table is already
-    # known to have the configured dimension.
-    version = db.migrate(conn)
-    from .vector import ensure_vector_tables
-
-    ensure_vector_tables(conn, int(config.models.embed.dim))
-    db.set_meta(conn, "schema_version", str(version))
-    result = dict(manifest)
-    result["counts"] = _counts(conn)
     result["path"] = str(source)
     return result

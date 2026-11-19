@@ -42,7 +42,6 @@ function shortPath(path: string): string {
 export function WorkPanel({ online, artifacts, onOpenArtifact, onOpenFile }: WorkPanelProps) {
   const workbench = useWorkbench(online)
   const [tab, setTab] = useState<Tab>('files')
-  const [note, setNote] = useState('')
 
   const changed = useMemo(() => {
     const set = new Set<string>()
@@ -68,7 +67,7 @@ export function WorkPanel({ online, artifacts, onOpenArtifact, onOpenFile }: Wor
   const openTasks = workbench.tasks.filter(
     (task) => task.status === 'active' || task.status === 'paused',
   ).length
-  const message = note || workbench.note
+  const message = workbench.note
 
   return (
     <div className="work">
@@ -236,10 +235,7 @@ export function WorkPanel({ online, artifacts, onOpenArtifact, onOpenFile }: Wor
                       <button
                         className="change-action"
                         title="Restore the file from this backup"
-                        onClick={() => {
-                          setNote('')
-                          void workbench.undo(change.backupId)
-                        }}
+                        onClick={() => void workbench.undo(change.backupId)}
                       >
                         undo
                       </button>

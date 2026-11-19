@@ -29,11 +29,14 @@ if (trims.drift.length > 0) {
 }
 console.log(`[smoke] sprite trims ok (${trims.sheets} sheets, ${trims.clips} clips)`)
 
+const smokeEnv = { ...process.env, CAPRI_FAKE_BRAIN: '1' }
+delete smokeEnv.ELECTRON_RUN_AS_NODE
+
 const child = spawn(electronPath, ['.', '--smoke'], {
   cwd: appDir,
   stdio: 'inherit',
   // Deterministic planner: no model, no GPU, no network.
-  env: { ...process.env, CAPRI_FAKE_BRAIN: '1' },
+  env: smokeEnv,
 })
 
 child.on('exit', (code, signal) => {

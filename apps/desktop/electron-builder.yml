@@ -7,7 +7,8 @@ directories:
   buildResources: assets
 files:
   - main.mjs
-  - preload.mjs
+  - preload.cjs
+  - preload-pet.cjs
   - package.json
   - assets/**
   - dist/**

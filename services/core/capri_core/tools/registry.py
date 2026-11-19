@@ -12,10 +12,6 @@ from .base import ToolContext, ToolHandler, ToolResult, ToolSpec, elapsed_ms
 log = logging.getLogger("capri.tools")
 
 
-class ToolFailure(Exception):
-    pass
-
-
 class Registry:
     def __init__(self) -> None:
         self._specs: dict[str, ToolSpec] = {}

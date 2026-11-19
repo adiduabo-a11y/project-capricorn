@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +41,7 @@ class PiperEngine:
         self.path = voice_path(config)
         self._voice: object | None = None
         self._error: str | None = None
+        self._lock = threading.Lock()
 
     @property
     def config_path(self) -> Path:
@@ -72,21 +74,24 @@ class PiperEngine:
     def _load(self) -> object:
         if self._voice is not None:
             return self._voice
-        reason = self.reason()
-        if reason:
-            raise TtsUnavailable(reason)
-        try:
-            from piper.voice import PiperVoice  # type: ignore[import-not-found]
-        except ImportError as exc:  # pragma: no cover - reason() covers it
-            self._error = "piper is not installed: uv sync --package capri-core --extra piper"
-            raise TtsUnavailable(self._error) from exc
-        log.info("loading piper from %s", self.path)
-        try:
-            self._voice = PiperVoice.load(str(self.path), config_path=str(self.config_path))
-        except Exception as exc:
-            self._error = f"Piper failed to load: {exc}"
-            raise TtsUnavailable(self._error) from exc
-        return self._voice
+        with self._lock:
+            if self._voice is not None:
+                return self._voice
+            reason = self.reason()
+            if reason:
+                raise TtsUnavailable(reason)
+            try:
+                from piper.voice import PiperVoice  # type: ignore[import-not-found]
+            except ImportError as exc:  # pragma: no cover - reason() covers it
+                self._error = "piper is not installed: uv sync --package capri-core --extra piper"
+                raise TtsUnavailable(self._error) from exc
+            log.info("loading piper from %s", self.path)
+            try:
+                self._voice = PiperVoice.load(str(self.path), config_path=str(self.config_path))
+            except Exception as exc:
+                self._error = f"Piper failed to load: {exc}"
+                raise TtsUnavailable(self._error) from exc
+            return self._voice
 
     def synthesize(self, text: str, *, voice: str, speed: float) -> Audio:
         piper = self._load()

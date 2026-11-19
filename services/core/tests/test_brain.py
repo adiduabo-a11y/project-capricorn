@@ -146,6 +146,10 @@ def test_grammar() -> None:
 
     decision = gbnf.decision(["fs.read", "fs.write"])
     check('"done"' in decision and '"fs.read"' in decision, "decision grammar enumerates tools")
+    check(
+        '"\\"" "path" "\\""' in grammar and '"\\"" "done" "\\""' in decision,
+        "grammar quotes JSON keys and enum literals",
+    )
 
 
 def test_validation() -> None:
@@ -205,6 +209,30 @@ def test_policy(workspace: str, cfg: PolicyCfg) -> None:
         ).verdict
         == "block",
         "ssh keys are blocked",
+    )
+    check(
+        policy.check(read, {"path": "C:/outside_unlisted_root/secret.txt"}).verdict == "confirm",
+        "reads outside allow_paths and workspace require confirmation",
+    )
+    check(
+        policy.check(shell, {"command": "echo 'a & whoami'"}).verdict == "confirm",
+        "single-quoted cmd operator injection requires confirmation",
+    )
+    check(
+        policy.check(shell, {"command": "echo $(whoami)"}).verdict == "confirm",
+        "command substitution is not treated as benign",
+    )
+    check(
+        policy.check(shell, {"command": "cmd /q /c shutdown /s"}).verdict == "block",
+        "cmd /q /c cannot bypass blocked commands",
+    )
+    check(
+        policy.check(shell, {"command": "shutdown.exe /s"}).verdict == "block",
+        "exe suffix cannot bypass blocked commands",
+    )
+    check(
+        policy.check(shell, {"command": "type C:\\Users\\daeme\\.ssh\\id_rsa"}).verdict == "block",
+        "benign shell read cannot inspect denied paths",
     )
 
 

@@ -157,12 +157,16 @@ class VoiceService:
         self._stop = asyncio.Event()
         self._stop_reason = "cancel"
         self._busy = False
+        self._active_done: asyncio.Event | None = None
         self.last: dict[str, Any] = {}
         self.last_transcript: dict[str, Any] = {}
         self.last_rejection: dict[str, Any] | None = None
 
     async def aclose(self) -> None:
         await self.stop()
+        close = getattr(self.engine, "close", None)
+        if callable(close):
+            close()
 
     # ------------------------------------------------------------------ status
 
@@ -233,7 +237,9 @@ class VoiceService:
         # that was preempted keeps its own, already-set event and winds down,
         # instead of watching a flag the next run has just cleared.
         stop_event = asyncio.Event()
+        run_done = asyncio.Event()
         self._stop = stop_event
+        self._active_done = run_done
         self._busy = True
         self._stop_reason = "cancel"
         depth = max(1, self.config.voice.queue_depth)
@@ -329,22 +335,27 @@ class VoiceService:
         producer = asyncio.create_task(produce())
         consumer = asyncio.create_task(consume())
         try:
-            await asyncio.gather(producer, consumer)
-        except asyncio.CancelledError:
-            producer.cancel()
-            consumer.cancel()
-            raise
-        finally:
-            cancelled = stop_event.is_set()
-            # Only the run that still owns the flag may clear it: a preempted
-            # run must not hand a replacement stream a stale "not busy".
-            if self._stop is stop_event:
-                self._busy = False
+            try:
+                await asyncio.gather(producer, consumer)
+            except asyncio.CancelledError:
+                producer.cancel()
+                consumer.cancel()
+                raise
+            finally:
+                cancelled = stop_event.is_set()
+                # Only the run that still owns the flag may clear it: a preempted
+                # run must not hand a replacement stream a stale "not busy".
+                if self._stop is stop_event:
+                    self._busy = False
 
-        stats["ms"] = int((time.monotonic() - started) * 1000)
-        stop_reason = self._stop_reason if cancelled else "done"
-        stats["reason"] = "cancelled" if stop_reason == "cancel" else stop_reason
-        await emit({"type": "speech.stop", "reason": stop_reason})
+            stats["ms"] = int((time.monotonic() - started) * 1000)
+            stop_reason = self._stop_reason if cancelled else "done"
+            stats["reason"] = "cancelled" if stop_reason == "cancel" else stop_reason
+            await emit({"type": "speech.stop", "reason": stop_reason})
+        finally:
+            run_done.set()
+            if self._active_done is run_done:
+                self._active_done = None
         if self.conn is not None:
             db.trace(
                 self.conn,
@@ -366,7 +377,14 @@ class VoiceService:
         in the reason the renderer and trace receive."""
         self._stop_reason = reason if reason in ("cancel", "barge-in") else "cancel"
         self._stop.set()
-        await asyncio.sleep(0)  # let the producer/consumer notice
+        done = self._active_done
+        if done is not None and not done.is_set():
+            try:
+                await asyncio.wait_for(done.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
+        else:
+            await asyncio.sleep(0)  # let the producer/consumer notice
 
     async def barge_in(self) -> bool:
         """Stop speaking because the user started talking. No-op when idle."""

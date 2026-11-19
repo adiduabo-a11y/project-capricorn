@@ -6,11 +6,14 @@ applied idempotently and recorded in ``schema_migrations``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
 import sqlite3
+import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -20,12 +23,59 @@ log = logging.getLogger("capri.store")
 
 SQL_DIR = Path(__file__).parent / "sql"
 _MIGRATION_RE = re.compile(r"^(\d+)_(.+)\.sql$")
+_FALLBACK_LOCKS: dict[int, threading.RLock] = {}
+_FALLBACK_GUARD = threading.Lock()
+
+
+class LockedConnection(sqlite3.Connection):
+    """SQLite connection carrying its own re-entrant mutex for cross-thread safety."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._capri_lock = threading.RLock()
+
+
+def lock_for(conn: sqlite3.Connection) -> Any:
+    """Return the re-entrant lock protecting ``conn`` across threads."""
+    lock = getattr(conn, "_capri_lock", None)
+    if lock is not None:
+        return lock
+    key = id(conn)
+    with _FALLBACK_GUARD:
+        existing = _FALLBACK_LOCKS.get(key)
+        if existing is None:
+            existing = threading.RLock()
+            _FALLBACK_LOCKS[key] = existing
+        return existing
+
+
+@contextlib.contextmanager
+def transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    """Serialize and wrap multi-statement writes on ``conn`` in an atomic transaction."""
+    with lock_for(conn):
+        started = not conn.in_transaction
+        if started:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            if started and conn.in_transaction:
+                conn.rollback()
+            raise
+        else:
+            if started and conn.in_transaction:
+                conn.commit()
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
     target = path or paths.db_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(target, isolation_level=None, check_same_thread=False)
+    conn = sqlite3.connect(
+        target,
+        isolation_level=None,
+        check_same_thread=False,
+        factory=LockedConnection,
+    )
     conn.row_factory = sqlite3.Row
     # Another process holding the write lock is a wait, not an immediate
     # "database is locked" in the middle of a turn.
@@ -95,24 +145,25 @@ def trace(
     trace-viewer change landing together.
     """
     blob = json.dumps(payload, ensure_ascii=False, default=str) if payload is not None else None
-    cur = conn.execute(
-        "INSERT INTO traces (turn_id, workspace_id, task_id, span, name, payload,"
-        " tokens_in, tokens_out, ms, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            turn_id,
-            workspace_id or None,
-            task_id or None,
-            span,
-            name,
-            blob,
-            tokens_in,
-            tokens_out,
-            ms,
-            int(time.time() * 1000),
-        ),
-    )
-    return int(cur.lastrowid or 0)
+    with lock_for(conn):
+        cur = conn.execute(
+            "INSERT INTO traces (turn_id, workspace_id, task_id, span, name, payload,"
+            " tokens_in, tokens_out, ms, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                turn_id,
+                workspace_id or None,
+                task_id or None,
+                span,
+                name,
+                blob,
+                tokens_in,
+                tokens_out,
+                ms,
+                int(time.time() * 1000),
+            ),
+        )
+        return int(cur.lastrowid or 0)
 
 
 def recent_traces(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, Any]]:

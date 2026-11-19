@@ -113,6 +113,7 @@ class ScreenService:
         self.poll_s = poll_s
         self.last: Observation | None = None
         self._lock = threading.Lock()
+        self._pause_lock = threading.Lock()
         self._paused = False
         self._pause_reason = ""
 
@@ -139,10 +140,10 @@ class ScreenService:
 
     def pause(self, paused: bool = True, reason: str = "paused from the shell") -> dict[str, Any]:
         """Tray/global pause. Observing remains possible; touching does not."""
-        with self._lock:
+        with self._pause_lock:
             self._paused = bool(paused)
             self._pause_reason = "" if not paused else (reason or "paused")
-            return self.status()
+        return self.status()
 
     def resume(self) -> dict[str, Any]:
         return self.pause(False)
@@ -266,6 +267,10 @@ class ScreenService:
             deadline = time.monotonic() + max(1.0, min(float(timeout_s), 30.0))
             window: WindowInfo | None = None
             while time.monotonic() < deadline:
+                if self._paused:
+                    raise ScreenPaused(
+                        self._pause_reason or "screen control is paused; resume it from the tray"
+                    )
                 if self.activity.panic():
                     raise ScreenPaused("panic key held; input injection stopped")
                 matches = [
@@ -320,7 +325,9 @@ class ScreenService:
             if self.config.screen.redact_passwords:
                 redact = [element.bounds for element in observation.elements if element.password]
             try:
-                plain = self.backend.capture(observation.window, redact)
+                plain: bytes | None = None
+                if ocr or (include_shot and not marks):
+                    plain = self.backend.capture(observation.window, redact)
                 if ocr and plain:
                     try:
                         observation.ocr = self.backend.ocr(
@@ -356,6 +363,7 @@ class ScreenService:
             self._require_available()
             try:
                 observation = self._observe(include_shot=False, mark=False, ocr=True)
+                self._allowed(observation)
             except ScreenError:
                 return ""
             rows = observation.ocr or []
@@ -378,7 +386,8 @@ class ScreenService:
     def clipboard_read(self) -> dict[str, Any]:
         with self._lock:
             self._require_available()
-            self._observe(include_shot=False, mark=False)
+            observation = self._observe(include_shot=False, mark=False)
+            self._allowed(observation)
             # Reading the clipboard injects nothing, so a mouse move is not a
             # reason to refuse it. Mark, then check: pause and panic still veto,
             # while the latched input clock stops vetoing a read-only step.
@@ -394,7 +403,8 @@ class ScreenService:
     def clipboard_write(self, text: str) -> dict[str, Any]:
         with self._lock:
             self._require_available()
-            self._observe(include_shot=False, mark=False)
+            observation = self._observe(include_shot=False, mark=False)
+            self._allowed(observation)
             # Same contract as the read: replacing the clipboard is not input
             # injection, so it is not the user's takeover to veto.
             self.activity.mark()
@@ -449,10 +459,15 @@ class ScreenService:
             if action in ("click", "double_click", "move", "drag") and element is None:
                 if x is None or y is None:
                     raise ScreenBlocked(f"{action} needs element_id or x and y")
-            if action == "drag" and (x2 is None or y2 is None):
-                raise ScreenBlocked("drag needs x2 and y2 as the destination")
+                self._check_point(observation, x, y)
+            if action == "drag":
+                if x2 is None or y2 is None:
+                    raise ScreenBlocked("drag needs x2 and y2 as the destination")
+                self._check_point(observation, x2, y2)
             if action == "type_text" and not text:
                 raise ScreenBlocked("type_text needs text")
+            if action == "key":
+                self._check_key_chord(keys)
 
             before = observation.digest
             if element is not None and element_id:
@@ -643,6 +658,28 @@ class ScreenService:
         }
 
     @staticmethod
+    def _check_point(observation: Observation, x: int, y: int) -> None:
+        left, top, right, bottom = observation.window
+        if right <= left or bottom <= top:
+            return
+        if not (left <= int(x) <= right and top <= int(y) <= bottom):
+            raise ScreenBlocked(
+                f"coordinates ({x}, {y}) lie outside the allowlisted window {observation.window}"
+            )
+
+    @staticmethod
+    def _check_key_chord(keys: str) -> None:
+        parts = {part.strip().lower() for part in str(keys or "").split("+") if part.strip()}
+        if not parts:
+            return
+        if parts & {"win", "lwin", "rwin", "meta", "super"}:
+            raise ScreenBlocked("OS shortcut keys (Win) are blocked")
+        if ("alt" in parts and "tab" in parts) or (
+            "ctrl" in parts and "alt" in parts and ("del" in parts or "delete" in parts)
+        ) or ("ctrl" in parts and "shift" in parts and "esc" in parts):
+            raise ScreenBlocked(f"OS task-switch chord {keys!r} is blocked")
+
+    @staticmethod
     def _sensitive(element: Element) -> bool:
         name = f"{element.name} {element.automation_id}".lower()
         return any(word in name for word in SENSITIVE_WORDS)
@@ -672,6 +709,10 @@ class ScreenService:
         previous = ""
         latest: Observation | None = None
         while time.monotonic() < deadline:
+            if self._paused:
+                raise ScreenPaused(
+                    self._pause_reason or "screen control is paused; resume it from the tray"
+                )
             if self.activity.panic():
                 raise ScreenPaused("panic key held; input injection stopped")
             if watch_idle and self.activity.moved():

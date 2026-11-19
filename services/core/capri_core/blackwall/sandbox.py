@@ -36,35 +36,34 @@ def _python_executable() -> str:
 # audit, the broker and the approval card are the real gates - but a tool that
 # ignores capri_net and reaches for a socket fails here.
 _SOCKET_GUARD = r'''
-import json as _capri_json
-import socket as _capri_socket
+def _capri_install_socket_guard():
+    import json as _capri_json
+    import socket as _capri_socket
 
-_capri_net = _capri_json.loads(
-    sys.argv[NET_ARG] if len(sys.argv) > NET_ARG else "{}"
-) or {}
-_capri_broker_host = str(_capri_net.get("host") or "").lower().strip("[]")
-_capri_broker_port = int(_capri_net.get("port") or 0)
+    _capri_net = _capri_json.loads(
+        sys.argv[NET_ARG] if len(sys.argv) > NET_ARG else "{}"
+    ) or {}
+    _capri_broker_host = str(_capri_net.get("host") or "").lower().strip("[]")
+    _capri_broker_port = int(_capri_net.get("port") or 0)
 
+    def _capri_blocked(*args, **kwargs):
+        raise PermissionError(
+            "the Blackwall sandbox has no direct sockets; use capri_net.fetch"
+        )
 
-def _capri_blocked(*args, **kwargs):
-    raise PermissionError(
-        "the Blackwall sandbox has no direct sockets; use capri_net.fetch"
-    )
+    def _capri_is_broker(host, port):
+        if not _capri_broker_port:
+            return False
+        name = str(host or "").lower().strip("[]")
+        return name in {_capri_broker_host, "localhost"} and int(port or 0) == _capri_broker_port
 
-
-def _capri_is_broker(host, port):
     if not _capri_broker_port:
-        return False
-    name = str(host or "").lower().strip("[]")
-    return name in {_capri_broker_host, "localhost"} and int(port or 0) == _capri_broker_port
+        _capri_socket.socket = _capri_blocked
+        _capri_socket.create_connection = _capri_blocked
+        _capri_socket.socketpair = _capri_blocked
+        _capri_socket.getaddrinfo = _capri_blocked
+        return
 
-
-if not _capri_broker_port:
-    _capri_socket.socket = _capri_blocked
-    _capri_socket.create_connection = _capri_blocked
-    _capri_socket.socketpair = _capri_blocked
-    _capri_socket.getaddrinfo = _capri_blocked
-else:
     _capri_real_socket = _capri_socket.socket
     _capri_real_create = _capri_socket.create_connection
     _capri_real_gai = _capri_socket.getaddrinfo
@@ -86,6 +85,16 @@ else:
                 )
             return super().connect_ex(address)
 
+        def sendto(self, *args, **kwargs):
+            raise PermissionError(
+                "direct datagram egress is not allowed; use capri_net.fetch"
+            )
+
+        def sendmsg(self, *args, **kwargs):
+            raise PermissionError(
+                "direct datagram egress is not allowed; use capri_net.fetch"
+            )
+
     def _capri_create_connection(address, *rest, **kwargs):
         host, port = address[0], address[1]
         if not _capri_is_broker(host, port):
@@ -101,7 +110,12 @@ else:
 
     _capri_socket.socket = _CapriSocket
     _capri_socket.create_connection = _capri_create_connection
+    _capri_socket.socketpair = _capri_blocked
     _capri_socket.getaddrinfo = _capri_getaddrinfo
+
+
+_capri_install_socket_guard()
+del _capri_install_socket_guard
 '''
 
 
@@ -248,12 +262,12 @@ def run_process(
                     env=env,
                     timeout_s=timeout,
                 )
-            except Exception:
-                log.exception("contained Windows sandbox failed; using subprocess fallback")
-            else:
-                if timed_out:
-                    return {"ok": False, "output": f"sandbox timed out after {timeout:.1f}s"}
-                return _result(code, stdout[-20_000:], stderr[-8_000:])
+            except Exception as exc:
+                log.exception("contained Windows sandbox failed")
+                return {"ok": False, "output": f"contained Windows sandbox failed: {exc}"}
+            if timed_out:
+                return {"ok": False, "output": f"sandbox timed out after {timeout:.1f}s"}
+            return _result(code, stdout[-20_000:], stderr[-8_000:])
 
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         try:

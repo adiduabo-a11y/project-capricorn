@@ -156,8 +156,8 @@ class IdleScheduler:
             log.exception("scheduler stopped with an error")
 
     async def _loop(self) -> None:
-        interval = max(1.0, min(15.0, self.config.scheduler.interval_s / 4))
         while True:
+            interval = max(1.0, min(15.0, self.config.scheduler.interval_s / 4))
             await asyncio.sleep(interval)
             try:
                 self.run_once()

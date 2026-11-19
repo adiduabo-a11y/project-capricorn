@@ -41,6 +41,8 @@ export class PushToTalk {
   private rate = 48_000
   private timer: number | null = null
 
+  constructor(private readonly onMaxDuration?: () => void) {}
+
   get recording(): boolean {
     return this.unsubscribe !== null
   }
@@ -53,11 +55,11 @@ export class PushToTalk {
     const unsubscribe = micCapture.subscribe(this.collect, PREROLL_MS)
     this.unsubscribe = unsubscribe
     this.timer = window.setTimeout(() => {
-      try {
-        this.stop()
-      } catch {
-        /* already stopped, or nothing worth sending */
+      if (this.onMaxDuration) {
+        this.onMaxDuration()
+        return
       }
+      this.cancel()
     }, MAX_MS)
     try {
       // The shared graph opens lazily; surfacing its failure here is what lets

@@ -249,6 +249,13 @@ def test_windows_containment() -> None:
     )
     check(jobbed, "Windows sandbox attaches a Job Object")
     print(f"  .... restricted token: {restricted}")
+    big_code, big_out, _big_err, _to, _res, _job = win_sandbox.run(
+        [executable, "-I", "-c", "print('A' * 60000); print('TAIL_MARKER')"],
+        cwd=Path.cwd(),
+        env=os.environ.copy(),
+        timeout_s=10,
+    )
+    check(big_code == 0 and "TAIL_MARKER" in big_out, "Windows sandbox preserves stdout tail past 40 KB")
 
 
 class _TestServer(http.server.BaseHTTPRequestHandler):

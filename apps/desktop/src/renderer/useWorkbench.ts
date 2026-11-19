@@ -275,8 +275,10 @@ export function useWorkbench(online: boolean): Workbench {
 
   // Another surface (or the daemon restarting) can change the project.
   useEffect(() => {
+    let wsGen = 0
     return capri.onEvent((event) => {
       if (event.type === 'workspace.changed') {
+        const gen = ++wsGen
         setWorkspace(event.workspace)
         if (!event.workspace) {
           setInspection(null)
@@ -289,10 +291,13 @@ export function useWorkbench(online: boolean): Workbench {
               'project.current',
             )
             .then((result) => {
+              if (gen !== wsGen) return null
               setInspection(result.inspection ?? null)
               return capri.call<ProjectTree>('project.tree', { depth: 3 })
             })
-            .then((listing) => setTree(listing))
+            .then((listing) => {
+              if (gen === wsGen && listing) setTree(listing)
+            })
             .catch(() => undefined)
           void refresh()
           void loadTasks()
@@ -301,7 +306,6 @@ export function useWorkbench(online: boolean): Workbench {
       if (event.type === 'task.changed') void loadTasks()
       if (event.type === 'screen.changed') {
         setScreen(event.screen)
-        void loadScreen()
       }
       // A patch or a command mid-turn changes the list; refresh at the end of
       // the turn rather than on every artifact.
@@ -310,7 +314,7 @@ export function useWorkbench(online: boolean): Workbench {
         void loadTasks()
       }
     })
-  }, [refresh, loadTasks, loadScreen])
+  }, [refresh, loadTasks])
 
   return {
     workspace,

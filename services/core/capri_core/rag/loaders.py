@@ -136,7 +136,10 @@ def _pdf_text(data: bytes) -> str:
         raise LoadError("PDF ingest needs pypdf (pip install pypdf)") from exc
     from io import BytesIO
 
-    reader = PdfReader(BytesIO(data))
+    try:
+        reader = PdfReader(BytesIO(data))
+    except Exception as exc:
+        raise LoadError(f"could not read PDF: {exc}") from exc
     pages: list[str] = []
     for number, page in enumerate(reader.pages, start=1):
         try:
@@ -156,7 +159,10 @@ def _docx_text(data: bytes) -> str:
         raise LoadError("DOCX ingest needs python-docx (pip install python-docx)") from exc
     from io import BytesIO
 
-    document = docx.Document(BytesIO(data))
+    try:
+        document = docx.Document(BytesIO(data))
+    except Exception as exc:
+        raise LoadError(f"could not read DOCX: {exc}") from exc
     return "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text.strip())
 
 

@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import { ConfirmModal } from './ConfirmModal'
+import { DocsDrawer } from './DocsDrawer'
+import { MemoryDrawer } from './MemoryDrawer'
 import { SettingsPanel } from './SettingsPanel'
 import { UpdateChip } from './UpdateChip'
 import { BargeMonitor } from './audio/barge'
@@ -38,56 +41,17 @@ import { CommandConsole } from './CommandConsole'
 import { petCueFor } from './petCue'
 import { DiffView } from './DiffView'
 import { WorkPanel, type ArtifactEntry } from './WorkPanel'
-import { McpApproveCard, TIERS } from './McpCard'
+import { TIERS } from './McpCard'
 import './bubble.css'
 
 type Status = 'connecting' | 'online' | 'offline'
 
+const MAX_LIVE_ENTRIES = 400
+const MAX_STALE_TURNS = 64
+const MAX_CITED_TURNS = 16
 
-
-interface NetworkCard {
-  containment?: string
-  note?: string
-  hosts?: Array<{
-    host: string
-    scheme: string
-    methods: string[]
-    paths: string[]
-    maxResponseBytes: number
-    requestsPerHour: number
-    writes?: boolean
-    highBudget?: boolean
-  }>
-  secrets?: Array<{ name: string; header: string; hosts: string[] }>
-}
-
-// The Blackwall card says what a generated tool may do in words, not JSON.
-function describeCapabilities(raw: unknown): string {
-  const caps = (raw ?? {}) as Record<string, unknown>
-  const flags = ['network', 'read_files', 'write_files', 'subprocess', 'screen'].filter(
-    (name) => caps[name] === true,
-  )
-  return flags.length ? flags.join(' · ') : 'no capabilities'
-}
-
-function describeNetwork(card: NetworkCard): string {
-  const lines = [`network · ${card.containment ?? 'declared'}`]
-  for (const rule of card.hosts ?? []) {
-    const kb = Math.round((rule.maxResponseBytes ?? 0) / 1024)
-    const paths = (rule.paths ?? []).join(', ')
-    const marks = [
-      rule.highBudget ? 'high budget' : '',
-      rule.writes ? 'writes: first call confirmed' : '',
-    ].filter(Boolean)
-    lines.push(
-      `${(rule.methods ?? []).join('/')} ${rule.scheme}://${rule.host}${paths} · ${rule.requestsPerHour}/h · ${kb} KB${marks.map((mark) => ` · ${mark}`).join('')}`,
-    )
-  }
-  for (const secret of card.secrets ?? []) {
-    lines.push(`uses ${secret.name} → ${secret.header} (${(secret.hosts ?? []).join(', ')})`)
-  }
-  if (card.note) lines.push(card.note)
-  return lines.join('\n')
+function capLiveEntries<T>(entries: T[]): T[] {
+  return entries.length > MAX_LIVE_ENTRIES ? entries.slice(-MAX_LIVE_ENTRIES) : entries
 }
 
 interface MessageEntry {
@@ -290,10 +254,11 @@ export default function App() {
   const [uiMode, setUiModeState] = useState<UiMode>(readUiMode)
   const [bubbleSide, setBubbleSide] = useState<BubbleSide>('above')
   const [status, setStatus] = useState<Status>('connecting')
+  const statusRef = useRef<Status>(status)
+  statusRef.current = status
   const [version, setVersion] = useState('')
   const [entries, setEntries] = useState<Entry[]>([])
   const [mood, setMood] = useState<string>('idle')
-  const [mouth, setMouth] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [streaming, setStreaming] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -579,7 +544,7 @@ export default function App() {
       const turnId = activeTurn.current
       if (!turnId) return false
       playerRef.current?.stop()
-      setMouth(null)
+      capri.setMouth(null)
       void capri.call('voice.stop', { reason: 'cancel' }).catch(() => undefined)
       try {
         await capri.call('turn.cancel', { turnId })
@@ -626,7 +591,7 @@ export default function App() {
         stopBarge()
         bargedRef.current = true
         playerRef.current?.stop()
-        setMouth(null)
+        capri.setMouth(null)
         setVoiceState('idle')
         void capri.call('voice.barge_in').catch(() => undefined)
       },
@@ -643,7 +608,7 @@ export default function App() {
     clearWakeFollowUp()
     playerRef.current?.stop()
     stopBarge()
-    setMouth(null)
+    capri.setMouth(null)
     void capri.call('voice.stop', { reason: 'cancel' }).catch(() => undefined)
     try {
       await capri.call('session.new')
@@ -739,6 +704,11 @@ export default function App() {
         // cancelled turn can still emit after its own cancellation.
         for (const superseded of event.superseded ?? []) staleTurns.current.add(superseded)
         if (activeTurn.current) staleTurns.current.add(activeTurn.current)
+        while (staleTurns.current.size > MAX_STALE_TURNS) {
+          const oldest = staleTurns.current.values().next().value
+          if (oldest === undefined) break
+          staleTurns.current.delete(oldest)
+        }
         activeTurn.current = null
         citations.current.clear()
         stepSeq.current = 0
@@ -752,7 +722,7 @@ export default function App() {
         setStreaming(null)
         setConfirming(null)
         setError(null)
-        setMouth(null)
+        capri.setMouth(null)
         setVoiceNote('')
         break
       }
@@ -790,35 +760,39 @@ export default function App() {
       case 'agent.step': {
         if (event.tool === 'done') break
         stepSeq.current += 1
-        setEntries((prev) => [
-          ...prev,
-          {
-            kind: 'step',
-            id: `s_${event.turnId}_${event.step}_${stepSeq.current}`,
-            turnId: event.turnId,
-            step: event.step,
-            // The planner's thought is private: the protocol tells her it is
-            // never shown, and it is the only place she reasons freely. The
-            // step row keeps the tool name, not the sentence behind it.
-            thought: '',
-            tool: event.tool,
-          },
-        ])
+        setEntries((prev) =>
+          capLiveEntries([
+            ...prev,
+            {
+              kind: 'step',
+              id: `s_${event.turnId}_${event.step}_${stepSeq.current}`,
+              turnId: event.turnId,
+              step: event.step,
+              // The planner's thought is private: the protocol tells her it is
+              // never shown, and it is the only place she reasons freely. The
+              // step row keeps the tool name, not the sentence behind it.
+              thought: '',
+              tool: event.tool,
+            },
+          ]),
+        )
         break
       }
       case 'context.compacted': {
         stepSeq.current += 1
-        setEntries((prev) => [
-          ...prev,
-          {
-            kind: 'step',
-            id: `c_${event.turnId}_${stepSeq.current}`,
-            turnId: event.turnId,
-            step: 0,
-            thought: `${event.droppedObservations} older observations summarised (~${event.tokensSaved} tokens freed).`,
-            tool: 'context',
-          },
-        ])
+        setEntries((prev) =>
+          capLiveEntries([
+            ...prev,
+            {
+              kind: 'step',
+              id: `c_${event.turnId}_${stepSeq.current}`,
+              turnId: event.turnId,
+              step: 0,
+              thought: `${event.droppedObservations} older observations summarised (~${event.tokensSaved} tokens freed).`,
+              tool: 'context',
+            },
+          ]),
+        )
         break
       }
       case 'agent.tool': {
@@ -828,21 +802,23 @@ export default function App() {
         if (event.name.startsWith('screen.')) {
           capri.petCue(event.ok ? 'watch' : 'hop')
         }
-        setEntries((prev) => [
-          ...prev,
-          {
-            kind: 'tool',
-            id: `t_${event.turnId}_${toolSeq.current}`,
-            turnId: event.turnId,
-            name: event.name,
-            args: event.args,
-            ok: event.ok,
-            tier: event.tier,
-            tierName: event.tierName,
-            output: event.output,
-            ms: event.ms,
-          },
-        ])
+        setEntries((prev) =>
+          capLiveEntries([
+            ...prev,
+            {
+              kind: 'tool',
+              id: `t_${event.turnId}_${toolSeq.current}`,
+              turnId: event.turnId,
+              name: event.name,
+              args: event.args,
+              ok: event.ok,
+              tier: event.tier,
+              tierName: event.tierName,
+              output: event.output,
+              ms: event.ms,
+            },
+          ]),
+        )
         break
       }
       case 'agent.confirm': {
@@ -869,7 +845,7 @@ export default function App() {
         setEntries((prev) => {
           const index = prev.findIndex((entry) => entry.id === id)
           if (index < 0) {
-            return [
+            return capLiveEntries([
               ...prev,
               {
                 kind: 'message',
@@ -879,7 +855,7 @@ export default function App() {
                 text: event.text,
                 pending: true,
               },
-            ]
+            ])
           }
           const next = prev.slice()
           const current = next[index] as MessageEntry
@@ -928,6 +904,11 @@ export default function App() {
           preview: event.preview,
         })
         citations.current.set(event.turnId, list)
+        while (citations.current.size > MAX_CITED_TURNS) {
+          const oldest = citations.current.keys().next().value
+          if (oldest === undefined) break
+          citations.current.delete(oldest)
+        }
         break
       }
       case 'agent.done': {
@@ -935,7 +916,7 @@ export default function App() {
         setEntries((prev) => {
           const index = prev.findIndex((entry) => entry.id === id)
           if (index < 0) {
-            return [
+            return capLiveEntries([
               ...prev,
               {
                 kind: 'message',
@@ -944,7 +925,7 @@ export default function App() {
                 role: 'assistant',
                 text: event.text,
               },
-            ]
+            ])
           }
           const next = prev.slice()
           const current = next[index] as MessageEntry
@@ -952,17 +933,19 @@ export default function App() {
           return next
         })
         const sources = citations.current.get(event.turnId)
+        citations.current.delete(event.turnId)
         if (sources && sources.length > 0) {
-          citations.current.delete(event.turnId)
-          setEntries((prev) => [
-            ...prev,
-            {
-              kind: 'cites',
-              id: `c_${event.turnId}`,
-              turnId: event.turnId,
-              items: sources.slice(0, 6),
-            },
-          ])
+          setEntries((prev) =>
+            capLiveEntries([
+              ...prev,
+              {
+                kind: 'cites',
+                id: `c_${event.turnId}`,
+                turnId: event.turnId,
+                items: sources.slice(0, 6),
+              },
+            ]),
+          )
         }
         activeTurn.current = null
         setStreaming(null)
@@ -973,7 +956,7 @@ export default function App() {
         const id = `a_${event.turnId}`
         setEntries((prev) => {
           if (prev.some((entry) => entry.id === id)) return prev
-          return [
+          return capLiveEntries([
             ...prev,
             {
               kind: 'message',
@@ -982,7 +965,7 @@ export default function App() {
               role: 'assistant',
               text: event.text,
             },
-          ]
+          ])
         })
         break
       }
@@ -998,12 +981,12 @@ export default function App() {
         if (!playerRef.current) {
           playerRef.current = new SpeechPlayer(
             audioEngine,
-            (viseme) => setMouth(viseme),
+            (viseme) => capri.setMouth(viseme),
             () => {
               // Nothing is decoding or playing: close the mouth and let the
               // barge monitor go. This is the real end of an utterance.
               stopBarge()
-              setMouth(null)
+              capri.setMouth(null)
             },
           )
         }
@@ -1023,10 +1006,11 @@ export default function App() {
         }
         stopBarge()
         playerRef.current?.stop()
-        setMouth(null)
+        capri.setMouth(null)
         break
       }
       case 'error': {
+        if (activeTurn.current) citations.current.delete(activeTurn.current)
         setError(event.message)
         setMood('error')
         setConfirming(null)
@@ -1064,7 +1048,7 @@ export default function App() {
   }, [])
 
   const beginPtt = useCallback(async () => {
-    if (voiceStateRef.current !== 'idle' || status !== 'online') return
+    if (voiceStateRef.current !== 'idle' || statusRef.current !== 'online') return
     bargedRef.current = false
     const info = voiceStatusRef.current
     if (info?.stt?.available === false) {
@@ -1074,12 +1058,12 @@ export default function App() {
     setVoiceNote('')
     stopBarge()
     playerRef.current?.stop()
-    setMouth(null)
+    capri.setMouth(null)
     if (playerRef.current) void capri.call('voice.barge_in').catch(() => undefined)
     pttHeld.current = true
     voiceStateRef.current = 'listening'
     setVoiceState('listening')
-    if (!micRef.current) micRef.current = new PushToTalk()
+    if (!micRef.current) micRef.current = new PushToTalk(() => void finishPtt())
     try {
       await micRef.current.start()
       if (!pttHeld.current && voiceStateRef.current === 'listening') void finishPtt()
@@ -1090,7 +1074,7 @@ export default function App() {
       micRef.current.cancel()
       setVoiceNote(err instanceof Error ? err.message : String(err))
     }
-  }, [finishPtt, status, stopBarge])
+  }, [finishPtt, stopBarge])
 
   /**
    * Answer a wake that held only her name. It is a line, not a turn: nothing is
@@ -1326,7 +1310,7 @@ export default function App() {
       if (value) {
         playerRef.current?.stop()
         stopBarge()
-        setMouth(null)
+        capri.setMouth(null)
       }
     })
     const off = capri.onEvent(handleEvent)
@@ -1355,8 +1339,17 @@ export default function App() {
       offWake()
       offMuted()
       offHotkey()
+      playerRef.current?.stop()
       stopBarge()
       micRef.current?.cancel()
+      if (notesNoteTimer.current !== null) {
+        window.clearTimeout(notesNoteTimer.current)
+        notesNoteTimer.current = null
+      }
+      if (wakeCueTimer.current !== null) {
+        window.clearTimeout(wakeCueTimer.current)
+        wakeCueTimer.current = null
+      }
     }
   }, [beginPtt, finishPtt, handleEvent, loadVoice, stopBarge])
 
@@ -1435,10 +1428,6 @@ export default function App() {
     }
     node.scrollTop = node.scrollHeight
   }, [entries, error, confirming, uiMode])
-
-  useEffect(() => {
-    capri.setMouth(mouth)
-  }, [mouth])
 
   useEffect(() => {
     console.log('[capri] ui ready')
@@ -1620,16 +1609,18 @@ export default function App() {
       setDraft('')
       setError(null)
       const turnStamp = Date.now()
-      setEntries((prev) => [
-        ...prev,
-        {
-          kind: 'message',
-          id: `u_${turnStamp}`,
-          turnId: '',
-          role: 'user',
-          text,
-        },
-      ])
+      setEntries((prev) =>
+        capLiveEntries([
+          ...prev,
+          {
+            kind: 'message',
+            id: `u_${turnStamp}`,
+            turnId: '',
+            role: 'user',
+            text,
+          },
+        ]),
+      )
 
       const cue = petCueFor(text)
       if (cue) capri.petCue(cue)
@@ -1725,13 +1716,6 @@ export default function App() {
     [workspace],
   )
 
-  // Blackwall proposals carry their own review material inside args. Keep the
-  // generic JSON view for ordinary tool calls, but label a tool-version card.
-  const blackwall =
-    confirming?.tool === 'tool.propose'
-      ? (confirming.args as Record<string, unknown>)
-      : null
-  const networkCard = (blackwall?.network ?? null) as NetworkCard | null
   // A server card needs its own body (command, env, a tier each) and its own
   // actions, so the plain approve/deny underneath is suppressed while it shows.
   const mcpCard =
@@ -2218,166 +2202,36 @@ export default function App() {
             onClose={() => setSettingsOpen(false)}
           />
         ) : docsOpen ? (
-          <div className="docs">
-            <div className="mem-search">
-              <input
-                value={docsPath}
-                onChange={(event) => setDocsPath(event.target.value)}
-                placeholder="folder or file to index…"
-                spellCheck={false}
-              />
-              <button
-                className="mem-sweep"
-                onClick={() => void ingestDocs()}
-                disabled={docsBusy || status !== 'online' || !docsPath.trim()}
-                title="Index this path"
-              >
-                index
-              </button>
-            </div>
-            {docsNote ? <p className="mem-note">{docsNote}</p> : null}
-            <div className="doc-cols">
-              {collections.length === 0 ? (
-                <span className="empty">Nothing indexed yet.</span>
-              ) : (
-                collections.map((collection) => (
-                  <span key={collection.name} className="doc-col">
-                    {collection.name}
-                    <b>{collection.docs}</b>docs <b>{collection.chunks}</b>chunks
-                  </span>
-                ))
-              )}
-            </div>
-            <div className="mem-search">
-              <input
-                value={docsQuery}
-                onChange={(event) => setDocsQuery(event.target.value)}
-                placeholder="search documents…"
-                spellCheck={false}
-              />
-            </div>
-            <div className="mem-list">
-              {docHits.length === 0 ? (
-                <p className="empty">{docsBusy ? 'searching…' : 'No matches.'}</p>
-              ) : null}
-              {docHits.map((hit) => (
-                <div
-                  key={hit.chunkId}
-                  className="doc"
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => void openDoc(hit.path, hit.span[0])}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') void openDoc(hit.path, hit.span[0])
-                  }}
-                >
-                  <div className="mem-head">
-                    <span className="doc-path">{shortPath(hit.path)}</span>
-                    {hit.heading ? <span className="doc-heading">› {hit.heading}</span> : null}
-                    <span className="spacer" />
-                    <span className="mem-imp">{Math.round(hit.score * 100)}</span>
-                  </div>
-                  <p className="mem-text">{hit.text.slice(0, 220)}</p>
-                </div>
-              ))}
-            </div>
-          </div>
+          <DocsDrawer
+            online={status === 'online'}
+            path={docsPath}
+            onPathChange={setDocsPath}
+            query={docsQuery}
+            onQueryChange={setDocsQuery}
+            busy={docsBusy}
+            note={docsNote}
+            collections={collections}
+            hits={docHits}
+            shortPath={shortPath}
+            onIngest={() => void ingestDocs()}
+            onOpenDoc={(path, offset) => void openDoc(path, offset)}
+          />
         ) : memoryOpen ? (
-          <div className="memories">
-            <div className="mem-search">
-              <input
-                value={memoryQuery}
-                onChange={(event) => setMemoryQuery(event.target.value)}
-                placeholder="search the shard…"
-                spellCheck={false}
-              />
-              <button
-                className="mem-sweep"
-                onClick={() => void sweepMemory()}
-                disabled={memoryBusy || status !== 'online'}
-                title="Run decay now"
-              >
-                sweep
-              </button>
-            </div>
-            {memoryNote ? <p className="mem-note">{memoryNote}</p> : null}
-            {memoryPicks.length ? (
-              <div className="mem-picks">
-                <span className="mem-picked">{memoryPicks.length} picked</span>
-                <button
-                  className="mem-pick-act"
-                  onClick={() => void mergePickedMemory()}
-                  disabled={memoryPicks.length < 2 || memoryBusy}
-                  title="Fold the picked memories into one"
-                >
-                  merge
-                </button>
-                <button
-                  className="mem-pick-act"
-                  onClick={() => void forgetPickedMemory()}
-                  disabled={memoryBusy}
-                  title="Forget the picked memories"
-                >
-                  forget
-                </button>
-                <button
-                  className="mem-pick-act"
-                  onClick={() => setMemoryPicks([])}
-                  title="Clear the selection"
-                >
-                  clear
-                </button>
-              </div>
-            ) : null}
-            <div className="mem-list">
-              {memories.length === 0 ? (
-                <p className="empty">
-                  {memoryBusy ? 'reading the shard…' : 'Nothing in the shard yet.'}
-                </p>
-              ) : null}
-              {memories.map((item) => (
-                <div
-                  key={item.id}
-                  className="mem"
-                  data-kind={item.kind}
-                  data-picked={memoryPicks.includes(item.id) ? 'true' : undefined}
-                >
-                  <div className="mem-head">
-                    <span className="mem-kind">{item.kind}</span>
-                    <span className="mem-id">#{item.id}</span>
-                    <span className="spacer" />
-                    {item.sources?.length ? (
-                      <span className="mem-src">{item.sources.join('+')}</span>
-                    ) : null}
-                    <span
-                      className="mem-imp"
-                      title={`importance ${item.importance.toFixed(2)}`}
-                    >
-                      {Math.round(item.importance * 100)}
-                    </span>
-                    <button
-                      className="mem-pick"
-                      aria-pressed={memoryPicks.includes(item.id)}
-                      title={
-                        memoryPicks.includes(item.id) ? 'Unpick' : 'Pick to merge or forget'
-                      }
-                      onClick={() => toggleMemoryPick(item.id)}
-                    >
-                      {memoryPicks.includes(item.id) ? '◼' : '◻'}
-                    </button>
-                    <button
-                      className="mem-forget"
-                      title="Forget this"
-                      onClick={() => void forgetMemory(item.id)}
-                    >
-                      ×
-                    </button>
-                  </div>
-                  <p className="mem-text">{item.text}</p>
-                </div>
-              ))}
-            </div>
-          </div>
+          <MemoryDrawer
+            online={status === 'online'}
+            query={memoryQuery}
+            onQueryChange={setMemoryQuery}
+            busy={memoryBusy}
+            note={memoryNote}
+            memories={memories}
+            picks={memoryPicks}
+            onSweep={() => void sweepMemory()}
+            onMergePicked={() => void mergePickedMemory()}
+            onForgetPicked={() => void forgetPickedMemory()}
+            onClearPicks={() => setMemoryPicks([])}
+            onTogglePick={toggleMemoryPick}
+            onForget={(id) => void forgetMemory(id)}
+          />
         ) : workOpen ? (
           <WorkPanel
             online={status === 'online'}
@@ -2493,63 +2347,10 @@ export default function App() {
         )}
 
         {confirming ? (
-          <div className="confirm">
-            <div className="confirm-head">
-              <span className="confirm-tool">{confirming.tool}</span>
-              <span className="confirm-tier" data-tier={confirming.tier}>
-                {confirming.tierName}
-              </span>
-              <span className="spacer" />
-              <span className="confirm-timer">{confirming.timeout}s</span>
-            </div>
-            <p className="confirm-reason">{confirming.reason}</p>
-            {blackwall ? (
-              <div className="confirm-blackwall">
-                <div className="confirm-blackwall-head">
-                  <strong>
-                    {String(blackwall.name)} {String(blackwall.version)}
-                  </strong>
-                  <span>{describeCapabilities(blackwall.capabilities)}</span>
-                </div>
-                {networkCard ? (
-                  <pre className="confirm-args confirm-network">
-                    {describeNetwork(networkCard)}
-                  </pre>
-                ) : null}
-                <pre className="confirm-args">
-                  {JSON.stringify(blackwall.audit ?? [], null, 2)}
-                </pre>
-                <pre className="confirm-args">
-                  {JSON.stringify(blackwall.review ?? {}, null, 2)}
-                </pre>
-                <pre className="confirm-args">{String(blackwall.tests ?? '')}</pre>
-                <pre className="confirm-args">{String(blackwall.testSource ?? '')}</pre>
-                <pre className="confirm-args confirm-diff">
-                  {String(blackwall.diff ?? '')}
-                </pre>
-              </div>
-            ) : mcpCard ? (
-              <McpApproveCard
-                key={confirming.confirmId}
-                servers={mcpCard.servers}
-                skipped={mcpCard.skipped}
-                notes={mcpCard.notes}
-                onAnswer={(approved, tiers) => void answerConfirm(approved, tiers)}
-              />
-            ) : (
-              <pre className="confirm-args">{JSON.stringify(confirming.args, null, 2)}</pre>
-            )}
-            {mcpCard ? null : (
-              <div className="confirm-actions">
-                <button className="deny" onClick={() => void answerConfirm(false)}>
-                  deny
-                </button>
-                <button className="approve" onClick={() => void answerConfirm(true)}>
-                  approve
-                </button>
-              </div>
-            )}
-          </div>
+          <ConfirmModal
+            confirming={confirming}
+            onAnswer={(approved, tiers) => void answerConfirm(approved, tiers)}
+          />
         ) : null}
 
         {artifact ? (

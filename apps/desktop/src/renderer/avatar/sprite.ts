@@ -160,7 +160,11 @@ export async function createSpriteCapri(pack: SpritePack): Promise<CapriFigure> 
     body.texture = activeClip.frames[index]
   }
 
+  let lastMouthKey = ''
   function refreshMouth(): void {
+    const key = `${stateName}:${viseme}:${mouthFrames ? 1 : 0}`
+    if (key === lastMouthKey) return
+    lastMouthKey = key
     if (!mouthFrames || stateName !== 'talking') {
       mouth.visible = false
       return

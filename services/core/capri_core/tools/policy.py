@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from ..config import PolicyCfg
-from ..pathsafe import denied, matches_deny, resolve, within
+from ..pathsafe import denied, resolve, within
 from .base import ToolSpec
 
 Verdict = Literal["allow", "confirm", "block"]
@@ -132,6 +132,16 @@ _GIT_BRANCH_LISTING = frozenset(
 _DISCARD_TARGETS = frozenset({"nul", "/dev/null", "$null", "/dev/stdout", "/dev/stderr"})
 
 _TOKEN = re.compile(r'"[^"]*"|\'[^\']*\'|\S+')
+_EXPANSION_RE = re.compile(r"\$\(|`|%[^%\s]+%")
+
+
+def _cmd_name(token: str) -> str:
+    """Normalize a command token: strip cmd `^` escapes, paths, and `.exe`."""
+    cleaned = token.replace("^", "").strip()
+    base = os.path.basename(cleaned.replace("\\", "/")).lower()
+    if base.endswith(".exe"):
+        base = base[:-4]
+    return base
 
 
 @dataclass(frozen=True)
@@ -159,21 +169,19 @@ def _within(child: str, root: str) -> bool:
     return within(child, root)
 
 
-def _matches_glob(path: str, pattern: str) -> bool:
-    return matches_deny(path, pattern)
-
-
 def _segments(command: str) -> list[str]:
     """Split a command line on ``;``, ``&``, ``&&``, ``||`` and pipes, quote-aware.
 
     A single ``&`` chains commands in cmd.exe and backgrounds them in POSIX
     shells, so it separates commands for policy purposes too. ``2>&1`` is a
-    file-descriptor duplication, not a separator.
+    file-descriptor duplication, not a separator. On Windows, ``cmd.exe`` does
+    not treat ``'`` as a quote delimiter, so only ``"`` quotes operators there.
     """
     out: list[str] = []
     buf: list[str] = []
     quote = ""
     index = 0
+    quote_chars = ('"',) if os.name == "nt" else ("'", '"')
     while index < len(command):
         char = command[index]
         if quote:
@@ -182,7 +190,7 @@ def _segments(command: str) -> list[str]:
                 quote = ""
             index += 1
             continue
-        if char in ("'", '"'):
+        if char in quote_chars:
             quote = char
             buf.append(char)
             index += 1
@@ -227,26 +235,32 @@ def _tokens(segment: str) -> list[str]:
 
 
 def _strip_wrapper(tokens: list[str]) -> list[str]:
-    """Look past ``cmd /c`` and ``powershell -Command``, which are just runners."""
+    """Look past ``cmd ... /c`` and ``powershell ... -Command``, which are just runners."""
     while tokens:
-        first = tokens[0].lower()
+        first = _cmd_name(tokens[0])
         if first == "&":
             tokens = tokens[1:]
             continue
-        if first in ("cmd", "cmd.exe") and len(tokens) > 1 and tokens[1].lower() in (
-            "/c",
-            "/k",
-        ):
-            tokens = tokens[2:]
-            continue
-        if first in (
-            "powershell",
-            "powershell.exe",
-            "pwsh",
-            "pwsh.exe",
-        ) and len(tokens) > 1 and tokens[1].lower() in ("-command", "-c"):
-            tokens = tokens[2:]
-            continue
+        if first == "cmd":
+            idx = next(
+                (i for i, t in enumerate(tokens[1:], 1) if t.lower() in ("/c", "/k")),
+                None,
+            )
+            if idx is not None:
+                tokens = tokens[idx + 1 :]
+                continue
+        if first in ("powershell", "pwsh"):
+            idx = next(
+                (
+                    i
+                    for i, t in enumerate(tokens[1:], 1)
+                    if t.lower() in ("-command", "-c", "-encodedcommand", "-enc", "-e")
+                ),
+                None,
+            )
+            if idx is not None:
+                tokens = tokens[idx + 1 :]
+                continue
         break
     return tokens
 
@@ -255,7 +269,8 @@ def _blocked_segment(segment: str) -> bool:
     tokens = _strip_wrapper(_tokens(segment))
     if not tokens:
         return False
-    lowered = [token.lower() for token in tokens]
+    lowered = [token.replace("^", "").lower() for token in tokens]
+    lowered[0] = _cmd_name(tokens[0])
     for pattern in _BLOCKED_COMMANDS:
         if tuple(lowered[: len(pattern)]) == pattern:
             return True
@@ -291,6 +306,7 @@ def _redirect_writes(segment: str) -> bool:
     """
     quote = ""
     index = 0
+    quote_chars = ('"',) if os.name == "nt" else ("'", '"')
     while index < len(segment):
         char = segment[index]
         if quote:
@@ -298,7 +314,7 @@ def _redirect_writes(segment: str) -> bool:
                 quote = ""
             index += 1
             continue
-        if char in ("'", '"'):
+        if char in quote_chars:
             quote = char
             index += 1
             continue
@@ -349,6 +365,8 @@ def _benign_segment(segment: str) -> bool:
     stripped = segment.strip()
     if not stripped:
         return True
+    if _EXPANSION_RE.search(stripped) or (os.name == "nt" and "^" in stripped):
+        return False
     tokens = _strip_wrapper(_tokens(stripped))
     if not tokens:
         return False
@@ -440,14 +458,18 @@ class Policy:
         verdict, reason = self.classify_path(path)
         if verdict == BLOCK:
             return Decision(BLOCK, 3, reason)
-        return Decision(ALLOW, 0, "reading is free")
+        if verdict == ALLOW or _within(path, self.workspace):
+            return Decision(ALLOW, 0, "reading is free")
+        return Decision(CONFIRM, 2, reason)
 
     def _check_fs_list(self, args: dict[str, Any]) -> Decision:
         path = resolve_path(str(args.get("path", "")), self.workspace)
         verdict, reason = self.classify_path(path)
         if verdict == BLOCK:
             return Decision(BLOCK, 3, reason)
-        return Decision(ALLOW, 0, "listing is free")
+        if verdict == ALLOW or _within(path, self.workspace):
+            return Decision(ALLOW, 0, "listing is free")
+        return Decision(CONFIRM, 2, reason)
 
     def _check_fs_grep(self, args: dict[str, Any]) -> Decision:
         raw = str(args.get("path") or "")
@@ -455,7 +477,9 @@ class Policy:
         verdict, reason = self.classify_path(path)
         if verdict == BLOCK:
             return Decision(BLOCK, 3, reason)
-        return Decision(ALLOW, 0, "searching is free")
+        if verdict == ALLOW or _within(path, self.workspace):
+            return Decision(ALLOW, 0, "searching is free")
+        return Decision(CONFIRM, 2, reason)
 
     def _check_fs_write(self, args: dict[str, Any]) -> Decision:
         path = resolve_path(str(args.get("path", "")), self.workspace)
@@ -573,6 +597,30 @@ class Policy:
             return False
         return str(command).strip() in self._detected_commands
 
+    def _benign_paths_allowed(self, command: str, cwd: str) -> Decision | None:
+        for segment in _segments(command):
+            tokens = _strip_wrapper(_tokens(segment))
+            if not tokens:
+                continue
+            cmd = _cmd_name(tokens[0])
+            if cmd not in ("type", "dir", "rg"):
+                continue
+            for token in tokens[1:]:
+                if token.startswith("-"):
+                    continue
+                if cmd == "dir" and token.startswith("/"):
+                    continue
+                if any(marker in token for marker in ("/", "\\", ":", "~", "*")) or os.path.exists(
+                    resolve_path(token, cwd)
+                ):
+                    target = resolve_path(token, cwd)
+                    verdict, reason = self.classify_path(target)
+                    if verdict == BLOCK:
+                        return Decision(BLOCK, 3, reason)
+                    if verdict != ALLOW and not _within(target, self.workspace):
+                        return Decision(CONFIRM, 2, reason)
+        return None
+
     def _check_shell_run(self, args: dict[str, Any]) -> Decision:
         command = str(args.get("command") or "").strip()
         if not command:
@@ -588,6 +636,9 @@ class Policy:
             return Decision(ALLOW, 1, "detected project command")
 
         if _command_benign(command):
+            path_decision = self._benign_paths_allowed(command, cwd)
+            if path_decision is not None:
+                return path_decision
             return Decision(ALLOW, 1, "read-only inspection command")
         return Decision(CONFIRM, 2, "arbitrary shell command")
 

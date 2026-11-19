@@ -12,6 +12,7 @@ afterwards and a single repair attempt covers the remainder.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 MAX_DEPTH = 4
@@ -44,6 +45,12 @@ def _lit(text: str) -> str:
             out.append(ch)
     out.append('"')
     return "".join(out)
+
+
+def _jstr(text: str) -> str:
+    """A GBNF expression matching a JSON-quoted string literal for ``text``."""
+    inner = json.dumps(str(text), ensure_ascii=False)[1:-1]
+    return f'"\\"" {_lit(inner)} "\\""'
 
 
 class _Builder:
@@ -96,7 +103,7 @@ class _Builder:
             elif value is None:
                 alts.append("null")
             else:
-                alts.append(_lit(str(value)))
+                alts.append(_jstr(str(value)))
         return " | ".join(dict.fromkeys(alts)) or "null"
 
     def _object(self, schema: dict[str, Any], depth: int) -> str:
@@ -104,7 +111,7 @@ class _Builder:
         if not isinstance(props, dict) or not props:
             return "object"
 
-        fields = [self.rule(f"{_lit(key)} ws \":\" ws {self.value(sub, depth + 1)}")
+        fields = [self.rule(f"{_jstr(key)} ws \":\" ws {self.value(sub, depth + 1)}")
                   for key, sub in props.items()]
         field = self.rule(" | ".join(fields))
         body = self.rule(f'{field} (ws "," ws {field})*')
@@ -141,11 +148,11 @@ def decision_schema(tools: list[str]) -> dict[str, Any]:
 
 def decision(tools: list[str]) -> str:
     """Grammar for one planner step: ``{thought, tool, final}``."""
-    tool_alts = " | ".join(dict.fromkeys([_lit("done"), *(_lit(t) for t in tools)]))
+    tool_alts = " | ".join(dict.fromkeys([_jstr("done"), *(_jstr(t) for t in tools)]))
     return (
-        f'root ::= "{{" ws {_lit("\"thought\"")} ws ":" ws str ws "," ws '
-        f'{_lit("\"tool\"")} ws ":" ws tool ws "," ws '
-        f'{_lit("\"final\"")} ws ":" ws str ws "}}"\n'
+        f'root ::= "{{" ws {_jstr("thought")} ws ":" ws str ws "," ws '
+        f'{_jstr("tool")} ws ":" ws tool ws "," ws '
+        f'{_jstr("final")} ws ":" ws str ws "}}"\n'
         f"tool ::= {tool_alts}\n"
         'str ::= "\\"" ( [^"\\\\] | "\\\\" . )* "\\""\n'
         "ws ::= [ \\t\\n\\r]*\n"

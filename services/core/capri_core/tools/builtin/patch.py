@@ -146,6 +146,11 @@ async def fs_patch(
         return ToolResult.error(f"fs.patch: {problem}")
 
     try:
+        size = file.stat().st_size
+        if size > 2_000_000:
+            return ToolResult.error(
+                f"fs.patch: {_display(target, ctx.workspace)} is {size} bytes (max 2000000)"
+            )
         raw = file.read_bytes()
     except OSError as exc:
         return ToolResult.error(f"fs.patch: {exc}")
@@ -192,6 +197,14 @@ async def fs_patch(
         return ToolResult.error("fs.patch: those edits leave the file unchanged")
 
     after_hash = engine.sha256_text(after)
+    try:
+        engine.write_atomic(target, engine.encode_file(after))
+    except OSError as exc:
+        return ToolResult.error(
+            f"fs.patch: could not write {_display(target, ctx.workspace)}: {exc}. "
+            "The original file is untouched."
+        )
+
     backup_id = ""
     if ctx.conn is not None:
         backup_id = work_store.record_backup(
@@ -204,14 +217,6 @@ async def fs_patch(
             turn_id=ctx.turn_id,
             added=added,
             removed=removed,
-        )
-
-    try:
-        engine.write_atomic(target, engine.encode_file(after))
-    except OSError as exc:
-        return ToolResult.error(
-            f"fs.patch: could not write {_display(target, ctx.workspace)}: {exc}. "
-            "The original file is untouched."
         )
 
     if ctx.reads is not None:

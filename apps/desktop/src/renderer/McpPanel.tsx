@@ -52,11 +52,19 @@ function splitArgs(text: string): string[] {
 }
 
 /** One env variable while it is being edited. */
-type EnvRow = { key: string; value: string }
+type EnvRow = { id: number; key: string; value: string }
+
+let nextEnvRowId = 1
+
+function makeEnvRow(key = '', value = ''): EnvRow {
+  return { id: nextEnvRowId++, key, value }
+}
+
+const DEFAULT_DRAFT_ROW: EnvRow = { id: 0, key: '', value: '' }
 
 /** The editor starts from what the daemon reports, in config order. */
 function envRows(env: Record<string, string> | undefined): EnvRow[] {
-  return Object.entries(env ?? {}).map(([key, value]) => ({ key, value }))
+  return Object.entries(env ?? {}).map(([key, value]) => makeEnvRow(key, value))
 }
 
 /** The variables a form is holding: a name left blank is not one. */
@@ -86,7 +94,7 @@ function EnvEditor({
   return (
     <div className="mcp-env">
       {rows.map((row, index) => (
-        <div className="mcp-env-row" key={index}>
+        <div className="mcp-env-row" key={row.id}>
           <input
             className="mcp-env-key"
             value={row.key}
@@ -114,7 +122,7 @@ function EnvEditor({
       <div className="mcp-env-row">
         <button
           className="mem-sweep"
-          onClick={() => onChange([...rows, { key: '', value: '' }])}
+          onClick={() => onChange([...rows, makeEnvRow()])}
           disabled={disabled}
         >
           add variable
@@ -169,17 +177,21 @@ export function McpPanel({ online }: { online: boolean }) {
   // What the last try of the add row answered. Nothing is saved by it.
   const [probe, setProbe] = useState<ToolTry | null>(null)
 
-  const load = useCallback(async () => {
-    try {
-      setList(await capri.call<List>('mcp.servers'))
-    } catch (err) {
-      setNote(message(err))
-    }
-  }, [])
-
   useEffect(() => {
-    if (online) void load()
-  }, [load, online])
+    if (!online) return
+    let alive = true
+    void capri
+      .call<List>('mcp.servers')
+      .then((res) => {
+        if (alive) setList(res)
+      })
+      .catch((err) => {
+        if (alive) setNote(message(err))
+      })
+    return () => {
+      alive = false
+    }
+  }, [online])
 
   const apply = useCallback((next: Saved, said: string) => {
     setList({ enabled: next.enabled, servers: next.servers })
@@ -335,7 +347,7 @@ export function McpPanel({ online }: { online: boolean }) {
 
   const ready = draft.name.trim() !== '' && draft.command.trim() !== '' && busy === null
   // The add form's env: one blank row to start with, and whatever was typed after.
-  const draftRows = draftEnv.length > 0 ? draftEnv : [{ key: '', value: '' }]
+  const draftRows = draftEnv.length > 0 ? draftEnv : [DEFAULT_DRAFT_ROW]
 
   return (
     <section className="mcp-panel">

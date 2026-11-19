@@ -342,6 +342,24 @@ def test_pause_clipboard(config: CapriConfig) -> None:
     check(not input.events, "no input injected while paused")
     check(svc.pause(False)["presence"] == "eyes open", "resume restores presence")
 
+    try:
+        svc.act("click", x=999, y=999)
+        check(False, "out-of-window coordinate click refused")
+    except ScreenBlocked:
+        check(True, "out-of-window coordinate click refused")
+    try:
+        svc.act("key", keys="win+r")
+        check(False, "Win shortcut chord refused")
+    except ScreenBlocked:
+        check(True, "Win shortcut chord refused")
+
+    unallowed_clip, _, _ = service(config, [observation(process="keepass.exe")])
+    try:
+        unallowed_clip.clipboard_read()
+        check(False, "clipboard read refuses non-allowlisted foreground window")
+    except ScreenBlocked:
+        check(True, "clipboard read refuses non-allowlisted foreground window")
+
     original_get = clipboard_mod.get_text
     original_set = clipboard_mod.set_text
     try:

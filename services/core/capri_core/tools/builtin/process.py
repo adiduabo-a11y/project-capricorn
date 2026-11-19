@@ -221,6 +221,7 @@ async def process_close(
     # taskkill without /F only posts the close message, and an app can sit on a
     # save prompt. Saying "closed" without looking would be a lie.
     survivors: list[str] = []
+    matched = list(found)
     deadline = time.monotonic() + _SETTLE_S
     wanted = {pid for _proc, pid in found}
     while time.monotonic() < deadline:
@@ -228,8 +229,10 @@ async def process_close(
         try:
             live = {pid for _proc, pid in await _tasklist()}
         except Exception:  # noqa: BLE001 - verification is best effort
+            survivors = [f"{proc} ({pid})" for proc, pid in matched]
             break
-        if not (wanted & live):
+        matched = [(proc, pid) for proc, pid in found if pid in live]
+        if not matched:
             break
     else:
         survivors = [f"{proc} ({pid})" for proc, pid in found if pid in live]

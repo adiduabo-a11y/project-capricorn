@@ -119,19 +119,49 @@ def digest(title: str, process: str, elements: Iterable[Element]) -> str:
     return hashlib.sha1("\n".join(body).encode("utf-8")).hexdigest()
 
 
+def _win_apis() -> tuple[Any, Any]:
+    """Return (user32, kernel32) with explicit 64-bit HANDLE/HWND signatures."""
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    if not getattr(_win_apis, "_configured", False):
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextLengthW.restype = ctypes.c_int
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetWindowTextW.restype = ctypes.c_int
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.IsIconic.argtypes = [wintypes.HWND]
+        user32.IsIconic.restype = wintypes.BOOL
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        _win_apis._configured = True  # type: ignore[attr-defined]
+    return user32, kernel32
+
+
 def _process_name(hwnd: int) -> str:
     if not hwnd or os.name != "nt":
         return ""
     try:
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-        pid = ctypes.c_ulong()
-        user32.GetWindowThreadProcessId(ctypes.c_void_p(hwnd), ctypes.byref(pid))
+        user32, kernel32 = _win_apis()
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
         handle = kernel32.OpenProcess(0x1000, False, pid.value)
         if not handle:
             return ""
         try:
-            size = ctypes.c_ulong(1024)
+            size = wintypes.DWORD(1024)
             buffer = ctypes.create_unicode_buffer(size.value)
             if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
                 return ""
@@ -146,12 +176,12 @@ def _window_title(hwnd: int) -> str:
     if not hwnd or os.name != "nt":
         return ""
     try:
-        user32 = ctypes.windll.user32
-        length = int(user32.GetWindowTextLengthW(ctypes.c_void_p(hwnd)))
+        user32, _ = _win_apis()
+        length = int(user32.GetWindowTextLengthW(wintypes.HWND(hwnd)))
         if length <= 0:
             return ""
         title = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(ctypes.c_void_p(hwnd), title, length + 1)
+        user32.GetWindowTextW(wintypes.HWND(hwnd), title, length + 1)
         return title.value
     except Exception:
         return ""
@@ -208,7 +238,7 @@ class WindowsBackend:
         """Visible, titled top-level windows in Z order (foreground first-ish)."""
         if not self.available():
             raise RuntimeError(self.reason())
-        user32 = ctypes.windll.user32
+        user32, _ = _win_apis()
         found: list[WindowInfo] = []
 
         @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -241,7 +271,7 @@ class WindowsBackend:
         """The current foreground window, without building a UIA tree."""
         if os.name != "nt":
             raise RuntimeError("screen control is Windows-only")
-        user32 = ctypes.windll.user32
+        user32, _ = _win_apis()
         hwnd = int(user32.GetForegroundWindow() or 0)
         if not hwnd:
             raise RuntimeError("no foreground window")
@@ -249,7 +279,7 @@ class WindowsBackend:
             hwnd,
             _window_title(hwnd),
             _process_name(hwnd),
-            minimized=bool(user32.IsIconic(hwnd)),
+            minimized=bool(user32.IsIconic(wintypes.HWND(hwnd))),
         )
 
     def observe(self, max_elements: int = 300, max_depth: int = 8) -> Observation:

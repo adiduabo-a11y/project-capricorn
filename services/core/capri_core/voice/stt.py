@@ -117,6 +117,7 @@ class FasterWhisperEngine:
         # The wake gate warms the weights in a worker thread while a wake RPC
         # may already be transcribing; one load per process, not two.
         self._lock = threading.Lock()
+        self._infer_lock = threading.Lock()
 
     def available(self) -> bool:
         return not self.reason() and self._error is None
@@ -182,37 +183,43 @@ class FasterWhisperEngine:
 
     def transcribe(self, wav: bytes, *, language: str | None = None) -> Transcript:
         samples, rate = decode_wav(wav)
+        duration_ms = int(round(samples.size * 1000 / max(1, rate)))
+        if rate != 16_000 and samples.size > 1:
+            target_len = max(1, int(round(samples.size * 16_000 / rate)))
+            positions = np.linspace(0.0, float(samples.size - 1), num=target_len)
+            samples = np.interp(positions, np.arange(samples.size), samples).astype(np.float32)
         model = self._load()
         try:
-            segments, info = model.transcribe(  # type: ignore[attr-defined]
-                samples,
-                language=(language or self.config.voice.language or None),
-                beam_size=1,
-                vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 250},
-                condition_on_previous_text=False,
-            )
-            rows: list[dict[str, Any]] = []
-            text_parts: list[str] = []
-            scored: list[float] = []
-            no_speech = 0.0
-            for segment in segments:
-                text = str(getattr(segment, "text", "") or "").strip()
-                avg_logprob = float(getattr(segment, "avg_logprob", 0.0) or 0.0)
-                no_speech_prob = float(getattr(segment, "no_speech_prob", 0.0) or 0.0)
-                no_speech = max(no_speech, no_speech_prob)
-                if text:
-                    text_parts.append(text)
-                    # A logprob is per token and negative; exp() puts it back in
-                    # 0..1, which is a confidence a threshold can be set on.
-                    scored.append(math.exp(avg_logprob))
-                rows.append(
-                    {
-                        "start": round(float(getattr(segment, "start", 0.0)), 3),
-                        "end": round(float(getattr(segment, "end", 0.0)), 3),
-                        "text": text,
-                    }
+            with self._infer_lock:
+                segments, info = model.transcribe(  # type: ignore[attr-defined]
+                    samples,
+                    language=(language or self.config.voice.language or None),
+                    beam_size=1,
+                    vad_filter=True,
+                    vad_parameters={"min_silence_duration_ms": 250},
+                    condition_on_previous_text=False,
                 )
+                rows: list[dict[str, Any]] = []
+                text_parts: list[str] = []
+                scored: list[float] = []
+                no_speech = 0.0
+                for segment in segments:
+                    text = str(getattr(segment, "text", "") or "").strip()
+                    avg_logprob = float(getattr(segment, "avg_logprob", 0.0) or 0.0)
+                    no_speech_prob = float(getattr(segment, "no_speech_prob", 0.0) or 0.0)
+                    no_speech = max(no_speech, no_speech_prob)
+                    if text:
+                        text_parts.append(text)
+                        # A logprob is per token and negative; exp() puts it back in
+                        # 0..1, which is a confidence a threshold can be set on.
+                        scored.append(math.exp(avg_logprob))
+                    rows.append(
+                        {
+                            "start": round(float(getattr(segment, "start", 0.0)), 3),
+                            "end": round(float(getattr(segment, "end", 0.0)), 3),
+                            "text": text,
+                        }
+                    )
         except Exception as exc:
             raise SttUnavailable(f"Whisper transcription failed: {exc}") from exc
 
@@ -220,7 +227,7 @@ class FasterWhisperEngine:
             text=" ".join(text_parts).strip(),
             language=str(getattr(info, "language", "") or ""),
             language_probability=float(getattr(info, "language_probability", 0.0) or 0.0),
-            duration_ms=int(round(samples.size * 1000 / max(1, rate))),
+            duration_ms=duration_ms,
             segments=rows,
             confidence=(sum(scored) / len(scored)) if scored else 0.0,
             no_speech_prob=no_speech,

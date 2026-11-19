@@ -38,6 +38,8 @@ export class SpeechPlayer {
   /** Bumped by stop(): a decode that lands afterwards must not schedule itself
    *  into the next utterance as a stray fragment. */
   private epoch = 0
+  /** Serializes decode+schedule so segment N+1 cannot overtake segment N. */
+  private chain: Promise<void> = Promise.resolve()
   private readonly onMouth: (viseme: string | null) => void
   private readonly onIdle: () => void
 
@@ -50,12 +52,20 @@ export class SpeechPlayer {
     this.onIdle = onIdle
   }
 
-  async enqueue(segment: SpeechSegment): Promise<void> {
+  enqueue(segment: SpeechSegment): Promise<void> {
     const epoch = this.epoch
     this.pending += 1
+    const run = this.chain.then(() => this.enqueueOrdered(segment, epoch))
+    this.chain = run.catch(() => undefined)
+    return run
+  }
+
+  private async enqueueOrdered(segment: SpeechSegment, epoch: number): Promise<void> {
+    if (epoch !== this.epoch) return
     let scheduled = false
     try {
       const ctx = await this.engine.resume()
+      if (epoch !== this.epoch) return
 
       let buffer: AudioBuffer
       try {
@@ -90,7 +100,10 @@ export class SpeechPlayer {
       const now = ctx.currentTime
       for (const frame of segment.visemes) {
         const delay = Math.max(0, (start + frame.t / 1000 - now) * 1000)
-        const timer = window.setTimeout(() => this.onMouth(frame.v), delay)
+        const timer = window.setTimeout(() => {
+          this.timers.delete(timer)
+          this.onMouth(frame.v)
+        }, delay)
         this.timers.add(timer)
       }
 

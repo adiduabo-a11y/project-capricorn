@@ -178,7 +178,7 @@ class Blackwall:
         implementation: str,
         tests: str,
     ) -> ToolResult:
-        staged = self.stage(manifest, implementation, tests)
+        staged = await asyncio.to_thread(self.stage, manifest, implementation, tests)
         if not staged.get("ok"):
             return ToolResult.error(str(staged.get("output") or staged.get("reason")))
         proposal_id = str(staged["proposalId"])
@@ -496,7 +496,10 @@ class Blackwall:
             return refused
         net = self._net_for(name, manifest)
         worker = self._workers.get(name)
-        if worker is None or worker.package != package.resolve():
+        if worker is not None and worker.package != package.resolve():
+            worker.close()
+            worker = None
+        if worker is None:
             worker = Worker(package, manifest, net=net)
             self._workers[name] = worker
         try:
@@ -506,6 +509,7 @@ class Blackwall:
         except (WorkerError, OSError, ValueError):
             log.exception("Blackwall worker for %s failed; using a one-shot process", name)
             self._close_worker(name)
+            net = self._net_for(name, manifest)
             result = await asyncio.to_thread(run_call, package, manifest, args, net)
         output = str(result.get("output") or "")
         return ToolResult(

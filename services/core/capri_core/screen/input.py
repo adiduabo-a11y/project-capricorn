@@ -274,14 +274,32 @@ class WindowsInput:
             raise OSError("windowing is Windows-only")
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
+        if not getattr(self.focus_window, "_configured", False):
+            user32.GetForegroundWindow.restype = wintypes.HWND
+            user32.GetWindowThreadProcessId.argtypes = [
+                wintypes.HWND,
+                ctypes.POINTER(wintypes.DWORD),
+            ]
+            user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+            user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.BringWindowToTop.argtypes = [wintypes.HWND]
+            user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+            user32.SetForegroundWindow.restype = wintypes.BOOL
+            user32.SetFocus.argtypes = [wintypes.HWND]
+            user32.SetFocus.restype = wintypes.HWND
+            user32.SwitchToThisWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
+            user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+            user32.AttachThreadInput.restype = wintypes.BOOL
+            kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+            self.focus_window._configured = True  # type: ignore[attr-defined]
         target = int(handle)
-        hwnd = ctypes.c_void_p(target)
+        hwnd = wintypes.HWND(target)
 
         def brought() -> bool:
             user32.ShowWindow(hwnd, 9)  # SW_RESTORE
             user32.BringWindowToTop(hwnd)
             user32.SetForegroundWindow(hwnd)
-            return user32.GetForegroundWindow() == target
+            return int(user32.GetForegroundWindow() or 0) == target
 
         if brought():
             user32.SetFocus(hwnd)
@@ -316,5 +334,5 @@ class WindowsInput:
         # here, because an Alt tap opens the target's menu and the next typed
         # characters become menu accelerators.
         user32.SwitchToThisWindow(hwnd, True)
-        if user32.GetForegroundWindow() != target:
+        if int(user32.GetForegroundWindow() or 0) != target:
             raise OSError("could not bring the window to the foreground")

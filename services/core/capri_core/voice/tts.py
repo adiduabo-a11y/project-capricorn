@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -85,6 +86,7 @@ class KokoroEngine:
         self._kokoro: object | None = None
         self._sherpa: object | None = None
         self._error: str | None = None
+        self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ paths
 
@@ -172,59 +174,65 @@ class KokoroEngine:
     def _load(self) -> object:
         if self._kokoro is not None:
             return self._kokoro
-        reason = self.reason()
-        if reason:
-            raise TtsUnavailable(reason)
-        try:
-            from kokoro_onnx import Kokoro  # type: ignore[import-not-found]
-        except ImportError as exc:  # pragma: no cover - covered by reason()
-            self._error = "kokoro-onnx is not installed: uv add kokoro-onnx"
-            raise TtsUnavailable(self._error) from exc
+        with self._lock:
+            if self._kokoro is not None:
+                return self._kokoro
+            reason = self.reason()
+            if reason:
+                raise TtsUnavailable(reason)
+            try:
+                from kokoro_onnx import Kokoro  # type: ignore[import-not-found]
+            except ImportError as exc:  # pragma: no cover - covered by reason()
+                self._error = "kokoro-onnx is not installed: uv add kokoro-onnx"
+                raise TtsUnavailable(self._error) from exc
 
-        log.info("loading kokoro from %s", self.directory)
-        try:
-            self._kokoro = Kokoro(str(self.model_path), str(self.voices_path))
-        except Exception as exc:  # a bad download should read like a bad download
-            self._error = f"Kokoro failed to load: {exc}"
-            raise TtsUnavailable(self._error) from exc
-        return self._kokoro
+            log.info("loading kokoro from %s", self.directory)
+            try:
+                self._kokoro = Kokoro(str(self.model_path), str(self.voices_path))
+            except Exception as exc:  # a bad download should read like a bad download
+                self._error = f"Kokoro failed to load: {exc}"
+                raise TtsUnavailable(self._error) from exc
+            return self._kokoro
 
     def _load_sherpa(self) -> object:
         """Load the same sherpa-onnx engine capri-desktop uses for her pack."""
         if self._sherpa is not None:
             return self._sherpa
-        reason = self.sherpa_reason()
-        if reason:
-            raise TtsUnavailable(reason)
-        try:
-            import sherpa_onnx  # type: ignore[import-not-found]
-        except ImportError as exc:  # pragma: no cover - covered by sherpa_reason()
-            raise TtsUnavailable(
-                "sherpa-onnx is not installed: uv sync --extra kokoro"
-            ) from exc
+        with self._lock:
+            if self._sherpa is not None:
+                return self._sherpa
+            reason = self.sherpa_reason()
+            if reason:
+                raise TtsUnavailable(reason)
+            try:
+                import sherpa_onnx  # type: ignore[import-not-found]
+            except ImportError as exc:  # pragma: no cover - covered by sherpa_reason()
+                raise TtsUnavailable(
+                    "sherpa-onnx is not installed: uv sync --extra kokoro"
+                ) from exc
 
-        log.info("loading sherpa-onnx kokoro from %s", self.directory)
-        try:
-            kokoro = sherpa_onnx.OfflineTtsKokoroModelConfig(
-                model=str(self.model_path),
-                voices=str(self.sherpa_voices_path),
-                tokens=str(self.tokens_path),
-                lexicon=str(self.speech_lexicon_path),
-            )
-            model = sherpa_onnx.OfflineTtsModelConfig(
-                kokoro=kokoro,
-                num_threads=max(1, min(6, (os.cpu_count() or 2) // 2)),
-                provider="cpu",
-                debug=False,
-            )
-            config = sherpa_onnx.OfflineTtsConfig(model=model, max_num_sentences=1)
-            if hasattr(config, "validate") and not config.validate():
-                raise ValueError("invalid Kokoro configuration")
-            self._sherpa = sherpa_onnx.OfflineTts(config)
-        except Exception as exc:
-            self._error = f"sherpa-onnx Kokoro failed to load: {exc}"
-            raise TtsUnavailable(self._error) from exc
-        return self._sherpa
+            log.info("loading sherpa-onnx kokoro from %s", self.directory)
+            try:
+                kokoro = sherpa_onnx.OfflineTtsKokoroModelConfig(
+                    model=str(self.model_path),
+                    voices=str(self.sherpa_voices_path),
+                    tokens=str(self.tokens_path),
+                    lexicon=str(self.speech_lexicon_path),
+                )
+                model = sherpa_onnx.OfflineTtsModelConfig(
+                    kokoro=kokoro,
+                    num_threads=max(1, min(6, (os.cpu_count() or 2) // 2)),
+                    provider="cpu",
+                    debug=False,
+                )
+                config = sherpa_onnx.OfflineTtsConfig(model=model, max_num_sentences=1)
+                if hasattr(config, "validate") and not config.validate():
+                    raise ValueError("invalid Kokoro configuration")
+                self._sherpa = sherpa_onnx.OfflineTts(config)
+            except Exception as exc:
+                self._error = f"sherpa-onnx Kokoro failed to load: {exc}"
+                raise TtsUnavailable(self._error) from exc
+            return self._sherpa
 
     def voices(self) -> list[str]:
         """List style names without loading either 325 MB ONNX model."""

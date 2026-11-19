@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 from collections import deque
 from typing import Any, Mapping
 
@@ -30,9 +31,60 @@ _CLIENT_INFO = {"name": "capri", "version": __version__}
 # would truncate a message mid-line and break the stream.
 _BUFFER = 16 * 1024 * 1024
 
+_SAFE_ENV_KEYS = frozenset(
+    {
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMDATA",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    }
+)
+_SAFE_ENV_PREFIXES = ("XDG_", "NODE_", "NPM_", "UV_", "PYTHON", "VIRTUAL_ENV")
+
+
+def _child_env(extra: Mapping[str, str]) -> dict[str, str]:
+    """Build subprocess environment without leaking daemon secrets/API keys."""
+    env: dict[str, str] = {}
+    for key, value in os.environ.items():
+        upper = key.upper()
+        if upper.startswith("CAPRI_SECRET_"):
+            continue
+        if upper in _SAFE_ENV_KEYS or upper.startswith(_SAFE_ENV_PREFIXES):
+            env[key] = value
+    env.update({str(k): str(v) for k, v in extra.items()})
+    return env
+
 
 class McpError(Exception):
     """A protocol-level failure: the server refused, or did not answer."""
+
+    def __init__(self, message: str, *, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def flatten_result(result: Mapping[str, Any]) -> tuple[str, bool]:
@@ -101,6 +153,7 @@ class McpClient:
         self._stderr_tail: deque[str] = deque(maxlen=8)
         self._next_id = 0
         self._modern = False
+        self._send_lock = asyncio.Lock()
         self.server_info: dict[str, Any] = {}
         self.protocol = ""
 
@@ -129,8 +182,9 @@ class McpClient:
             return
         if not self._command.strip():
             raise McpError(f"{self.name}: no command configured")
-        env = {**os.environ, **self._env}
+        env = _child_env(self._env)
         command = self._resolve_command()
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         try:
             self._proc = await asyncio.create_subprocess_exec(
                 command,
@@ -141,6 +195,7 @@ class McpClient:
                 env=env,
                 cwd=self._cwd,
                 limit=_BUFFER,
+                creationflags=flags,
             )
         except (OSError, ValueError) as exc:
             raise McpError(
@@ -181,6 +236,8 @@ class McpClient:
                 timeout_s=timeout_s,
             )
         except McpError as exc:
+            if exc.code not in (-32601, -32602):
+                raise
             # 2026-07-28 removed initialize on purpose. From here every request
             # carries the version and capabilities, and the server never opens
             # a session for us to close.
@@ -231,6 +288,14 @@ class McpClient:
         try:
             await asyncio.wait_for(proc.wait(), timeout=3.0)
         except (asyncio.TimeoutError, Exception):
+            if os.name == "nt" and proc.pid:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(
+                        subprocess.run,
+                        ["taskkill", "/pid", str(proc.pid), "/T", "/F"],
+                        capture_output=True,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
             with contextlib.suppress(Exception):
                 proc.kill()
                 await proc.wait()
@@ -238,15 +303,17 @@ class McpClient:
     # ------------------------------------------------------------------ transport
 
     async def _send(self, payload: Mapping[str, Any]) -> None:
-        proc = self._proc
-        if proc is None or proc.stdin is None or proc.returncode is not None:
-            raise McpError(f"{self.name}: not running")
         line = json.dumps(payload, ensure_ascii=False) + "\n"
-        try:
-            proc.stdin.write(line.encode("utf-8"))
-            await proc.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
-            raise McpError(f"{self.name}: the connection closed while writing") from exc
+        encoded = line.encode("utf-8")
+        async with self._send_lock:
+            proc = self._proc
+            if proc is None or proc.stdin is None or proc.returncode is not None:
+                raise McpError(f"{self.name}: not running")
+            try:
+                proc.stdin.write(encoded)
+                await proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                raise McpError(f"{self.name}: the connection closed while writing") from exc
 
     async def _read_stdout(self) -> None:
         proc = self._proc
@@ -288,8 +355,9 @@ class McpClient:
         error = message.get("error")
         if error:
             detail = error.get("message") if isinstance(error, Mapping) else str(error)
-            code = error.get("code") if isinstance(error, Mapping) else None
-            future.set_exception(McpError(f"{self.name}: {detail} ({code})"))
+            raw_code = error.get("code") if isinstance(error, Mapping) else None
+            code = raw_code if isinstance(raw_code, int) else None
+            future.set_exception(McpError(f"{self.name}: {detail} ({raw_code})", code=code))
             return
         future.set_result(message.get("result"))
 

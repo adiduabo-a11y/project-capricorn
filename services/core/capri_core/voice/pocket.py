@@ -204,7 +204,13 @@ def install_voice_state(
                 next((name for name in candidates if Path(name).name == DEFAULT_STATE), candidates[0]),
             )
             member = Path(chosen).name
-            data = archive.read(chosen)
+            max_state_bytes = 32 * 1024 * 1024
+            if archive.getinfo(chosen).file_size > max_state_bytes:
+                raise ValueError(f"{member} exceeds the {max_state_bytes} byte limit")
+            with archive.open(chosen) as stream:
+                data = stream.read(max_state_bytes + 1)
+            if len(data) > max_state_bytes:
+                raise ValueError(f"{member} exceeds the {max_state_bytes} byte limit")
     elif source.suffix.lower() == ".safetensors":
         data = source.read_bytes()
         member = source.name

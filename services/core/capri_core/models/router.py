@@ -210,9 +210,18 @@ class Router:
 
     def reconfigure(self, cfg: ModelsCfg) -> None:
         """Apply a settings change and force the next health check to be fresh."""
+        timeout_changed = cfg.request_timeout_s != self.cfg.request_timeout_s
         self.cfg = cfg
         self._healthy = None
         self._checked_at = 0.0
+        if timeout_changed and self._client is not None:
+            old = self._client
+            self._client = None
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(old.aclose())
+            except RuntimeError:
+                pass
 
     async def available(self) -> bool:
         """Is the endpoint serving models? Cached briefly; a dead endpoint is not retried per step."""
@@ -365,6 +374,9 @@ class Router:
         modes.append(self.cfg.structured)
 
         last = result
+        total_in = result.tokens_in
+        total_out = result.tokens_out
+        total_ms = result.ms
         for mode in modes:
             try:
                 repaired = await self.complete(
@@ -379,10 +391,19 @@ class Router:
                 log.warning("planner repair with %s failed: %s", mode, exc)
                 continue
 
-            last = repaired
+            total_in += repaired.tokens_in
+            total_out += repaired.tokens_out
+            total_ms += repaired.ms
+            last = ChatResult(
+                text=repaired.text,
+                tokens_in=total_in,
+                tokens_out=total_out,
+                ms=total_ms,
+                model=repaired.model,
+            )
             parsed, reason = _parse_decision(repaired.text, tools)
             if parsed is not None:
-                parsed.usage = repaired
+                parsed.usage = last
                 return parsed
 
             log.warning(
@@ -397,7 +418,13 @@ class Router:
             thought="",
             tool="done",
             final=PLANNER_FAILED,
-            usage=last,
+            usage=ChatResult(
+                text=last.text,
+                tokens_in=total_in,
+                tokens_out=total_out,
+                ms=total_ms,
+                model=last.model,
+            ),
             failed=True,
         )
 
@@ -452,7 +479,17 @@ class Router:
             problems = ["arguments must be a JSON object"]
 
         if problems and feedback is None:
-            return await self.args(spec, msgs, feedback="; ".join(problems))
+            repaired_args, repaired_usage = await self.args(
+                spec, msgs, feedback="; ".join(problems)
+            )
+            combined = ChatResult(
+                text=repaired_usage.text,
+                tokens_in=result.tokens_in + repaired_usage.tokens_in,
+                tokens_out=result.tokens_out + repaired_usage.tokens_out,
+                ms=result.ms + repaired_usage.ms,
+                model=repaired_usage.model or result.model,
+            )
+            return repaired_args, combined
 
         if problems:
             raise ToolArgsError(f"{spec.name}: {'; '.join(problems)}")

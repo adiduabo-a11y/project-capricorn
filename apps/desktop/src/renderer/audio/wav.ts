@@ -13,6 +13,27 @@ export function resample(samples: Float32Array, from: number, to: number): Float
   const length = Math.max(1, Math.round((samples.length * to) / from))
   const out = new Float32Array(length)
   const ratio = from / to
+  if (ratio > 1) {
+    // Box anti-aliasing prefilter when downsampling so high-frequency energy
+    // does not alias into the speech band sent to Whisper.
+    const half = 0.5 * ratio
+    for (let index = 0; index < length; index += 1) {
+      const center = index * ratio
+      const start = Math.max(0, Math.ceil(center - half))
+      const end = Math.min(samples.length - 1, Math.floor(center + half))
+      if (end < start) {
+        const left = Math.min(samples.length - 1, Math.floor(center))
+        const right = Math.min(samples.length - 1, left + 1)
+        const frac = center - left
+        out[index] = samples[left] * (1 - frac) + samples[right] * frac
+        continue
+      }
+      let sum = 0
+      for (let i = start; i <= end; i += 1) sum += samples[i]
+      out[index] = sum / (end - start + 1)
+    }
+    return out
+  }
   for (let index = 0; index < length; index += 1) {
     const position = index * ratio
     const left = Math.floor(position)

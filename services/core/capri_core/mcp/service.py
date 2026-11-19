@@ -296,7 +296,6 @@ class McpService:
             client = self.clients.get(name)
             if client is not None and not client.running:
                 self._forget(name, client)
-            prefix = f"mcp.{_NAME.sub('_', name).strip('._-') or 'server'}."
             rows.append(
                 {
                     "name": name,
@@ -307,7 +306,9 @@ class McpService:
                     "enabled": bool(server.enabled),
                     "tier": int(server.tier),
                     "running": name in self.clients,
-                    "tools": sorted(q for q in self.tools if q.startswith(prefix)),
+                    "tools": sorted(
+                        q for q, owner in self.tools.items() if owner.startswith(f"{name}/")
+                    ),
                     "error": self.errors.get(name, ""),
                 }
             )
@@ -369,6 +370,8 @@ class McpService:
             targets = set(names)
         for name in targets:
             await self._stop_one(name)
+        if not self.cfg.enabled:
+            return 0
         started = 0
         for name in targets:
             server = self.cfg.servers.get(name)

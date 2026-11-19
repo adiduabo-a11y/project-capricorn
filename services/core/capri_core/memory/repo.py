@@ -7,11 +7,14 @@ shard export drops them.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import sqlite3
 import time
 from typing import Any
+
+from ..store import vector
 
 KINDS = ("fact", "preference", "event", "relationship", "rule")
 _WORD = re.compile(r"[a-z0-9]+")
@@ -109,6 +112,9 @@ def forget(
         "UPDATE memories SET deleted_at = ? WHERE id = ? AND subject = ? AND deleted_at IS NULL",
         [(stamp, memory_id, subject) for memory_id in targets],
     )
+    for memory_id in targets:
+        with contextlib.suppress(sqlite3.Error):
+            vector.delete(conn, "memory_vec", memory_id)
     return targets
 
 

@@ -1,6 +1,6 @@
 """Filesystem tools: read, list, grep, write.
 
-These do not enforce policy themselves â€” the loop checks every call before it
+These do not enforce policy themselves — the loop checks every call before it
 is dispatched. What they *do* enforce is bounds: size caps so a stray read of a
 2 GB log cannot eat the context window, and a line range so the model can ask
 for the part of a file it actually needs.
@@ -161,6 +161,60 @@ def _decode(raw: bytes) -> tuple[str, str]:
         return raw.decode("utf-8", errors="replace"), "unknown"
 
 
+def _read_slice_sync(
+    file: Path, first: int, last: int, cap: int
+) -> tuple[int, str, list[str], int | None, str, int]:
+    size = file.stat().st_size
+    digest = _sha256(file)
+    if size <= cap or first == 1:
+        with file.open("rb") as handle:
+            raw = handle.read(cap)
+        text, encoding = _decode(raw)
+        lines = text.splitlines()
+        total_lines = len(lines) if len(raw) >= size else None
+        if total_lines is not None:
+            last = min(last, total_lines)
+        sliced = [
+            f"{number:5d}: {lines[number - 1]}"
+            for number in range(first, min(last, len(lines)) + 1)
+        ]
+        return size, digest, sliced, total_lines, encoding, len(raw)
+
+    # Large file with start_line > 1: stream past earlier lines instead of
+    # slicing only the first `cap` bytes from byte 0.
+    collected: list[str] = []
+    collected_bytes = 0
+    encoding = "utf-8"
+    line_no = 0
+    eof = False
+    with file.open("rb") as handle:
+        while True:
+            raw_line = handle.readline()
+            if not raw_line:
+                eof = True
+                break
+            line_no += 1
+            if line_no < first:
+                continue
+            if line_no > last:
+                break
+            if line_no == first and raw_line.startswith(b"\xef\xbb\xbf"):
+                raw_line = raw_line[3:]
+            stripped = raw_line.rstrip(b"\r\n")
+            try:
+                text_line = stripped.decode("utf-8")
+            except UnicodeDecodeError:
+                encoding = "unknown"
+                text_line = stripped.decode("utf-8", errors="replace")
+            if collected and collected_bytes + len(raw_line) > cap:
+                break
+            collected.append(f"{line_no:5d}: {text_line}")
+            collected_bytes += len(raw_line)
+    total_lines = line_no if eof else None
+    actual_last = min(last, line_no) if eof else (first + len(collected) - 1 if collected else last)
+    return size, digest, collected, total_lines, encoding, collected_bytes
+
+
 async def fs_read(
     ctx: ToolContext,
     *,
@@ -181,23 +235,19 @@ async def fs_read(
         )
 
     cap = min(max(1, int(max_bytes or MAX_READ_BYTES)), MAX_READ_BYTES)
-    try:
-        size = file.stat().st_size
-        with file.open("rb") as handle:
-            raw = handle.read(cap)
-        digest = await asyncio.to_thread(_sha256, file)
-    except OSError as exc:
-        return ToolResult.error(f"fs.read: {exc}")
-
-    text, encoding = _decode(raw)
-    lines = text.splitlines()
-    total_lines = len(lines) if len(raw) >= size else None
-
     first = max(1, int(start_line or 1))
     last = int(end_line or 0)
     if last <= 0:
         last = first + MAX_READ_LINES - 1
     last = max(first, min(last, first + MAX_RANGE_LINES - 1))
+
+    try:
+        size, digest, body_lines, total_lines, encoding, read_bytes = await asyncio.to_thread(
+            _read_slice_sync, file, first, last, cap
+        )
+    except OSError as exc:
+        return ToolResult.error(f"fs.read: {exc}")
+
     if total_lines is not None:
         last = min(last, total_lines)
 
@@ -206,14 +256,12 @@ async def fs_read(
             f"fs.read: start_line {first} is past the end of {total_lines}-line file"
         )
 
-    body_lines = [
-        f"{number:5d}: {lines[number - 1]}" for number in range(first, min(last, len(lines)) + 1)
-    ]
     body = "\n".join(body_lines) or "(empty file)"
     notes: list[str] = []
     if total_lines is None:
-        notes.append(f"[file continues past {len(raw)} bytes; line count unknown]")
-        notes.append(f"[lines {first}-{last}; continue with start_line={last + 1}]")
+        notes.append(f"[file continues past {read_bytes} bytes; line count unknown]")
+        shown_end = first + len(body_lines) - 1 if body_lines else last
+        notes.append(f"[lines {first}-{shown_end}; continue with start_line={shown_end + 1}]")
     elif last < total_lines:
         notes.append(
             f"[lines {first}-{last} of {total_lines}; continue with start_line={last + 1}]"
@@ -270,7 +318,7 @@ async def fs_list(ctx: ToolContext, *, path: str) -> ToolResult:
         except OSError:
             lines.append(f"{entry.name}  ?")
     if len(entries) > MAX_LIST_ENTRIES:
-        lines.append(f"â€¦ {len(entries) - MAX_LIST_ENTRIES} more entries")
+        lines.append(f"... {len(entries) - MAX_LIST_ENTRIES} more entries")
 
     return ToolResult(
         ok=True,
@@ -315,28 +363,14 @@ def _walk_files(root: Path, include: str) -> list[Path]:
     return found
 
 
-async def fs_grep(
-    ctx: ToolContext,
-    *,
-    pattern: str,
-    path: str = "",
-    include: str = "",
-    case_sensitive: bool = False,
-    max_matches: int = 80,
-) -> ToolResult:
-    started = time.monotonic()
-    try:
-        flags = 0 if case_sensitive else re.IGNORECASE
-        expression = re.compile(str(pattern), flags)
-    except re.error as exc:
-        return ToolResult.error(f"fs.grep: bad pattern: {exc}")
-
-    target = Path(resolve_path(str(path or ctx.workspace), ctx.workspace))
-    if not target.exists():
-        return ToolResult.error(f"fs.grep: no such path: {_display(str(target), ctx.workspace)}")
-
+def _grep_sync(
+    target: Path,
+    workspace: str,
+    expression: re.Pattern[str],
+    include: str,
+    limit: int,
+) -> tuple[list[str], int, bool]:
     root = target if target.is_dir() else target.parent
-    limit = max(1, min(int(max_matches or 80), 500))
     files = [target] if target.is_file() else _walk_files(root, include)
 
     matches: list[str] = []
@@ -360,7 +394,7 @@ async def fs_grep(
             # source of confident nonsense.
             continue
         scanned += 1
-        display = _display(str(file), ctx.workspace)
+        display = _display(str(file), workspace)
         for number, line in enumerate(text.splitlines(), 1):
             if not expression.search(line):
                 continue
@@ -368,6 +402,33 @@ async def fs_grep(
             if len(matches) >= limit:
                 capped = True
                 break
+    return matches, scanned, capped
+
+
+async def fs_grep(
+    ctx: ToolContext,
+    *,
+    pattern: str,
+    path: str = "",
+    include: str = "",
+    case_sensitive: bool = False,
+    max_matches: int = 80,
+) -> ToolResult:
+    started = time.monotonic()
+    try:
+        flags = 0 if case_sensitive else re.IGNORECASE
+        expression = re.compile(str(pattern), flags)
+    except re.error as exc:
+        return ToolResult.error(f"fs.grep: bad pattern: {exc}")
+
+    target = Path(resolve_path(str(path or ctx.workspace), ctx.workspace))
+    if not target.exists():
+        return ToolResult.error(f"fs.grep: no such path: {_display(str(target), ctx.workspace)}")
+
+    limit = max(1, min(int(max_matches or 80), 500))
+    matches, scanned, capped = await asyncio.to_thread(
+        _grep_sync, target, ctx.workspace, expression, include, limit
+    )
 
     if not matches:
         return ToolResult(

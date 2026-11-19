@@ -6,7 +6,7 @@ import react from '@vitejs/plugin-react'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(here, '../..')
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   root: path.join(here, 'src/renderer'),
   base: './',
   plugins: [react()],
@@ -25,6 +25,6 @@ export default defineConfig({
     outDir: path.join(here, 'dist'),
     emptyOutDir: true,
     target: 'esnext',
-    sourcemap: true,
+    sourcemap: mode === 'development',
   },
-})
+}))

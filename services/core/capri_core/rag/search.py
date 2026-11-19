@@ -234,6 +234,7 @@ async def search(
             scores = None
 
     if scores is not None and len(scores) == len(documents):
+        candidates = candidates[: len(documents)]
         for index, value in enumerate(scores):
             candidates[index].score = (
                 (1.0 - RERANK_WEIGHT) * candidates[index].score + RERANK_WEIGHT * float(value)

@@ -56,12 +56,15 @@ export function CapriStage({
   const figureRef = useRef<CapriFigure | null>(null)
   const readyRef = useRef(onReady)
   const inkRef = useRef(onInk)
+  const layoutRef = useRef<(() => void) | null>(null)
+  const growRef = useRef({ side: growSide, top: growTop, frame })
   const stateRef = useRef(state)
   const mouthRef = useRef(mouth ?? 'closed')
   const facingRef = useRef(facing)
 
   readyRef.current = onReady
   inkRef.current = onInk
+  growRef.current = { side: growSide, top: growTop, frame }
   stateRef.current = state
   mouthRef.current = mouth ?? 'closed'
   facingRef.current = facing
@@ -79,7 +82,6 @@ export function CapriStage({
 
     void (async () => {
       const instance = new Application()
-      app = instance
 
       await instance.init({
         backgroundAlpha: 0,
@@ -91,17 +93,19 @@ export function CapriStage({
       })
 
       if (disposed) {
-        instance.destroy(true, { children: true })
+        instance.destroy(true, { children: true, texture: true, textureSource: true })
         return
       }
+      app = instance
 
       host.appendChild(instance.canvas)
 
       const figure =
         pack.provider === 'sprite' ? await createSpriteCapri(pack) : createCapri(pack)
       if (disposed) {
-        figure.view.destroy({ children: true })
-        instance.destroy(true, { children: true })
+        figure.view.destroy({ children: true, texture: true, textureSource: true })
+        instance.destroy(true, { children: true, texture: true, textureSource: true })
+        app = null
         return
       }
       figureRef.current = figure
@@ -114,15 +118,17 @@ export function CapriStage({
         // The fit is measured against the actor box, never the canvas element:
         // the pet grows the canvas to hold taller art, and fitting to that would
         // magnify her by the same amount.
-        const frameW = frame?.[0] ?? (host.clientWidth || 1)
-        const frameH = frame?.[1] ?? Math.max(1, host.clientHeight || 1)
+        const g = growRef.current
+        const frameW = g.frame?.[0] ?? (host.clientWidth || 1)
+        const frameH = g.frame?.[1] ?? Math.max(1, host.clientHeight || 1)
         const scale = Math.min((frameW * 0.96) / pack.canvas[0], (frameH * 0.99) / pack.canvas[1])
         figure.view.scale.set(scale)
         // The anchor is the feet line: the actor's bottom edge, growTop pixels
         // into the canvas.
-        figure.view.position.set(growSide + frameW / 2, growTop + frameH - 2)
+        figure.view.position.set(g.side + frameW / 2, g.top + frameH - 2)
       }
 
+      layoutRef.current = layout
       layout()
       observer = new ResizeObserver(layout)
       observer.observe(host)
@@ -133,10 +139,11 @@ export function CapriStage({
       instance.ticker.add((ticker) => {
         figure.update(ticker.deltaMS)
         const ink = figure.inkRect?.() ?? null
+        const g = growRef.current
         const next = ink
           ? [
-              Math.round(ink.x - growSide),
-              Math.round(ink.y - growTop),
+              Math.round(ink.x - g.side),
+              Math.round(ink.y - g.top),
               Math.round(ink.width),
               Math.round(ink.height),
             ].join(',')
@@ -146,8 +153,8 @@ export function CapriStage({
           inkRef.current?.(
             ink
               ? {
-                  left: ink.x - growSide,
-                  top: ink.y - growTop,
+                  left: ink.x - g.side,
+                  top: ink.y - g.top,
                   width: ink.width,
                   height: ink.height,
                 }
@@ -167,14 +174,18 @@ export function CapriStage({
     return () => {
       disposed = true
       figureRef.current = null
+      layoutRef.current = null
       observer?.disconnect()
       if (app) {
-        app.destroy(true, { children: true })
+        app.destroy(true, { children: true, texture: true, textureSource: true })
         app = null
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [packName])
+
+  useEffect(() => {
+    layoutRef.current?.()
+  }, [growSide, growTop, frame?.[0], frame?.[1]])
 
   useEffect(() => {
     figureRef.current?.setState(state)

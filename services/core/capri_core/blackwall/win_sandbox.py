@@ -286,11 +286,17 @@ class SandboxProcess:
                     stream.close()
                 except OSError:
                     pass
-        kernel32.CloseHandle(HANDLE(self.handle))
+        self.stdin = None
+        self.stdout = None
+        self.stderr = None
+        if self.handle:
+            kernel32.CloseHandle(HANDLE(self.handle))
+            self.handle = 0
         if self.job:
             # Closing a kill-on-close job is the final backstop for any child
             # the generated tool managed to start before the audit stopped it.
             kernel32.CloseHandle(HANDLE(self.job))
+            self.job = 0
 
 
 def _make_job() -> tuple[int, bool]:
@@ -581,8 +587,9 @@ def run(
                 chunk = stream.read(65_536)
                 if not chunk:
                     return
-                if len(target) < 40_000:
-                    target.extend(chunk[: 40_000 - len(target)])
+                target.extend(chunk)
+                if len(target) > 40_000:
+                    del target[: len(target) - 40_000]
         except OSError:
             return
 

@@ -294,8 +294,15 @@ line is not enough, rather than guessing arguments.
 """
 
 
+def _safe_pack(pack: str) -> str:
+    cleaned = str(pack or "").strip()
+    if not cleaned or not re.fullmatch(r"[A-Za-z0-9_-]+", cleaned):
+        return DEFAULT_PACK
+    return cleaned
+
+
 def load_persona(pack: str = DEFAULT_PACK) -> str:
-    path = packs_dir() / "prompts" / pack / "system.md"
+    path = packs_dir() / "prompts" / _safe_pack(pack) / "system.md"
     try:
         text = Path(path).read_text(encoding="utf-8").strip()
     except OSError:

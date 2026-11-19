@@ -213,12 +213,19 @@ export class MicCapture {
     node.port.onmessage = (event: MessageEvent) => {
       const data = event.data as { samples: Float32Array; rate: number }
       this.recent.push(data.samples, data.rate)
-      for (const listener of this.listeners) listener(data.samples, data.rate)
+      for (const listener of this.listeners) {
+        try {
+          listener(data.samples, data.rate)
+        } catch (err) {
+          console.error('[capture] listener failed', err)
+        }
+      }
     }
     node.onprocessorerror = () => {
       this.failure = 'the capture processor stopped; voice input is off'
       this.close()
     }
+    this.watchTracks(stream)
     source.connect(node)
     node.connect(sink)
     sink.connect(ctx.destination)
@@ -263,8 +270,23 @@ export class MicCapture {
     graph.deviceId = deviceId
     previousSource.disconnect()
     for (const track of previousStream.getTracks()) track.stop()
+    this.watchTracks(stream)
     this.failure = null
     console.log('[capture] device', deviceId || 'system default')
+  }
+
+  private watchTracks(stream: MediaStream): void {
+    for (const track of stream.getAudioTracks()) {
+      track.addEventListener(
+        'ended',
+        () => {
+          if (this.graph?.stream !== stream) return
+          this.failure = 'microphone disconnected'
+          this.close()
+        },
+        { once: true },
+      )
+    }
   }
 
   private async openStream(): Promise<MediaStream> {

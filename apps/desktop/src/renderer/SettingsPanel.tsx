@@ -351,8 +351,26 @@ function BrainPanel({
   }, [])
 
   useEffect(() => {
-    void check()
-  }, [check])
+    let alive = true
+    setChecking(true)
+    setCheckError('')
+    void capri
+      .call<ModelsStatus>('models.status')
+      .then((res) => {
+        if (alive) setStatus(res)
+      })
+      .catch((err) => {
+        if (!alive) return
+        setStatus(null)
+        setCheckError(err instanceof Error ? err.message : String(err))
+      })
+      .finally(() => {
+        if (alive) setChecking(false)
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
 
   const prop = (key: string): JsonSchema => modelSchema.properties?.[key] ?? {}
   const endpoint = valueAt(config, ['models', 'endpoint'])

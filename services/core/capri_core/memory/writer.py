@@ -116,11 +116,13 @@ def _in_scope(row: dict[str, Any], workspace_id: str | None) -> bool:
     """A project memory is only visible inside its project.
 
     Rows written before workspaces existed carry no id and stay global, which
-    is also what a chat turn (no project) reads.
+    is also what a chat turn (no project) reads. ``None`` is an unscoped call.
     """
-    if not workspace_id:
+    if workspace_id is None:
         return True
     stored = str(row.get("workspace_id") or "")
+    if not workspace_id:
+        return not stored
     return not stored or stored == workspace_id
 
 
@@ -385,6 +387,7 @@ class MemoryWriter:
                     workspace_id=workspace_id,
                 )
                 repo.supersede(self.conn, int(nearest["id"]), memory_id)
+                vector.delete(self.conn, "memory_vec", int(nearest["id"]))
                 self._graph(item["entities"])
                 return {
                     "id": memory_id,

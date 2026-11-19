@@ -82,7 +82,7 @@ def ensure_vector_tables(conn: sqlite3.Connection, dim: int = DEFAULT_DIM) -> st
         if backend == "sqlite-vec":
             conn.execute(
                 f"CREATE VIRTUAL TABLE {table} USING vec0("
-                f" row_ref INTEGER PRIMARY KEY, embedding FLOAT[{dim}])"
+                f" row_ref INTEGER PRIMARY KEY, embedding FLOAT[{dim}] distance_metric=cosine)"
             )
         else:
             conn.execute(
@@ -134,6 +134,8 @@ def upsert(conn: sqlite3.Connection, table: str, row_ref: int, vector: Sequence[
 
 
 def delete(conn: sqlite3.Connection, table: str, row_ref: int) -> None:
+    if table not in VEC_TABLES:
+        raise ValueError(f"unknown vector table: {table}")
     conn.execute(f"DELETE FROM {table} WHERE row_ref = ?", (row_ref,))
 
 
@@ -167,5 +169,9 @@ def search(
     mat = np.stack([np.frombuffer(r["vec"], dtype=np.float32) for r in rows])
     mat /= np.linalg.norm(mat, axis=1, keepdims=True) + 1e-9
     scores = mat @ (q / (np.linalg.norm(q) + 1e-9))
-    order = np.argsort(-scores)[:k]
+    if len(scores) > k:
+        top = np.argpartition(-scores, k - 1)[:k]
+        order = top[np.argsort(-scores[top])]
+    else:
+        order = np.argsort(-scores)
     return [(int(ids[i]), float(scores[i])) for i in order]

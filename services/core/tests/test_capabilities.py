@@ -43,7 +43,7 @@ async def main() -> int:
     registry = builtin_registry()
     specs = registry.specs()
     catalogue = prompt.describe_tools(specs)
-    rows = [row for row in catalogue.splitlines() if row.strip()]
+    rows = [row for row in catalogue.splitlines() if row.startswith("- ")]
     system = prompt.system_prompt(specs, "kyoko", profile="work", request="close roblox studio")
 
     print("every tool is in the index")
@@ -57,7 +57,9 @@ async def main() -> int:
     for spec in specs:
         row = next((line for line in rows if line.startswith(f"- {spec.name}(")), "")
         note = consent_note(spec)
-        if note:
+        if note == "asks the person first":
+            check("[asks]" in row, f"{spec.name} says '[asks]'")
+        elif note:
             check(f"[{note}]" in row, f"{spec.name} says {note!r}")
         else:
             check("[" not in row.split("— ", 1)[-1], f"{spec.name} states no consent tag")

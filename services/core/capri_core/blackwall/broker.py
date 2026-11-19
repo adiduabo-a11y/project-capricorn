@@ -20,6 +20,7 @@ import ipaddress
 import json
 import logging
 import os
+import posixpath
 import socket
 import socketserver
 import ssl
@@ -28,7 +29,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlsplit, urljoin
+from urllib.parse import unquote, urljoin, urlsplit
 
 from .manifest import HostRule, SecretRule
 
@@ -173,6 +174,7 @@ class Broker:
 
             class _Handler(socketserver.StreamRequestHandler):
                 def handle(self) -> None:
+                    self.request.settimeout(30.0)
                     raw = self.rfile.readline(2 * 1024 * 1024)
                     try:
                         payload = json.loads(raw.decode("utf-8"))
@@ -251,11 +253,21 @@ class Broker:
             body = payload.get("body")
             if not isinstance(headers, dict):
                 raise BrokerError(400, "headers must be an object")
-            clean_headers = {
-                str(key): str(value)
-                for key, value in headers.items()
-                if str(key).lower() not in _UNSAFE_HEADERS and "\n" not in str(value)
-            }
+            clean_headers: dict[str, str] = {}
+            seen_lower: dict[str, str] = {}
+            for key, value in headers.items():
+                k = str(key)
+                v = str(value)
+                kl = k.lower()
+                if kl in _UNSAFE_HEADERS or any(ch in k for ch in ("\r", "\n", ":")):
+                    continue
+                if "\r" in v or "\n" in v:
+                    continue
+                prev = seen_lower.get(kl)
+                if prev is not None:
+                    clean_headers.pop(prev, None)
+                seen_lower[kl] = k
+                clean_headers[k] = v
             if body is not None and not isinstance(body, str):
                 body = json.dumps(body)
             if body is not None and len(body.encode("utf-8")) > MAX_BODY_BYTES:
@@ -287,14 +299,23 @@ class Broker:
         if parts.username is not None or parts.password is not None:
             raise BrokerError(403, "URLs must not carry credentials")
         host = normalize_host(parts.hostname)
-        path = parts.path or "/"
-        if path.startswith("//") or "\\" in path:
+        raw_path = parts.path or "/"
+        decoded_path = unquote(raw_path)
+        if raw_path.startswith("//") or "\\" in raw_path or "\\" in decoded_path:
             raise BrokerError(400, "the path is not normalized")
+        if any(part == ".." for part in decoded_path.split("/")):
+            raise BrokerError(403, "path traversal segments are not allowed")
+        path = posixpath.normpath(raw_path)
+        if raw_path.endswith("/") and path != "/":
+            path += "/"
+        default_port = 443 if parts.scheme == "https" else 80
         matched: tuple[int, HostRule] | None = None
         for index, rule in enumerate(grant.rules):
             if rule.scheme != parts.scheme:
                 continue
             if not host_matches(host, rule.host):
+                continue
+            if parts.port is not None and parts.port != default_port and not is_ip(rule.host):
                 continue
             if method not in rule.methods:
                 continue
@@ -367,6 +388,9 @@ class Broker:
                         f"{secret.name} is not configured; set "
                         f"{SECRET_ENV_PREFIX}{secret.name} in the daemon's environment",
                     )
+                secret_key = secret.header.lower()
+                for existing_key in [k for k in outgoing if k.lower() == secret_key]:
+                    del outgoing[existing_key]
                 outgoing[secret.header] = secret.prefix + value
             target = parts.path or "/"
             if parts.query:
