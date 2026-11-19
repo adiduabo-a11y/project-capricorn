@@ -591,7 +591,10 @@ function readToken() {
 function packagedSidecar() {
   if (!app.isPackaged) return ''
   const name = process.platform === 'win32' ? 'capri-core.exe' : 'capri-core'
-  return path.join(process.resourcesPath, name)
+  // The sidecar ships as a PyInstaller onedir bundle: the executable sits in
+  // its own folder beside the libraries it loads, so a launch does not unpack
+  // 400 MB into a temp folder first (~18 s with the voice engines inside).
+  return path.join(process.resourcesPath, 'capri-core', name)
 }
 
 function startSidecar() {

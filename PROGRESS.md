@@ -405,6 +405,16 @@ Measured here: 2.0 s of speech in 1.2 s warm, 5.4 s in 4.6 s — about 1.2x
 realtime. Fine for conversation, **not** the < 700 ms first-word budget; Kokoro
 remains the low-latency path.
 
+Packaging: the sidecar is a PyInstaller **onedir** bundle
+(`resources/capri-core/capri-core.exe` beside `_internal/`), because `--onefile`
+unpacks the whole payload on every launch: with torch in it that measured
+17.7-19.1 s for `--print-token` before any code ran. Onedir, the packaged app
+reaches a listening socket in 3.5 s from launch; the sidecar alone in 1.3-1.5 s
+warm, 6.1 s on its first run after a build (fresh bundle, AV scan). The NSIS
+installer packs the folder either way, and shrank from 543 MB to 429 MB.
+`main.mjs` spawns `resources/capri-core/capri-core.exe`; `electron-builder.yml`
+carries the folder with `capri-core/**`.
+
 Warm-up at startup: `PocketEngine.load()` and `VoiceService.prewarm()` run from
 `CapriServer.run`, on a worker thread, so the daemon's socket is free while the
 model loads. Measured by starting the daemon in a throwaway home: listening at

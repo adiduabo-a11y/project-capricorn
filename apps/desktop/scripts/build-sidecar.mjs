@@ -1,8 +1,13 @@
 /**
- * Build the Python daemon as a single executable next to the Electron app.
+ * Build the Python daemon next to the Electron app.
  *
  * The output is deliberately under `resources/`, which electron-builder copies
  * into the installed app. Run `npm run dist` for the whole installer.
+ *
+ * `--onedir`, not `--onefile`: onefile unpacks the whole payload (426 MB with
+ * torch, for Pocket's voice) into a temp folder on every launch, which measured
+ * ~18 s before the daemon could even print its version. Onedir starts in about
+ * the time Python takes to import; the installer packs the folder either way.
  */
 
 import { spawnSync } from 'node:child_process'
@@ -17,10 +22,16 @@ const coreDir = path.join(repoRoot, 'services/core')
 const resources = path.join(appDir, 'resources')
 const work = path.join(repoRoot, 'build/pyinstaller')
 const outputName = process.platform === 'win32' ? 'capri-core.exe' : 'capri-core'
+// PyInstaller's --onedir writes a folder named after --name; the executable is
+// the entry point inside it, beside the unpacked libraries.
+const bundleDir = path.join(resources, 'capri-core')
+const binary = path.join(bundleDir, outputName)
 const addData = `${path.join(coreDir, 'capri_core/store/sql')}${path.delimiter}capri_core/store/sql`
 
 mkdirSync(resources, { recursive: true })
 mkdirSync(work, { recursive: true })
+// Also clears a onefile build from before the switch, so the two never mix.
+rmSync(bundleDir, { recursive: true, force: true })
 rmSync(path.join(resources, outputName), { force: true })
 
 // Every extra the daemon imports at runtime is requested here, not inherited
@@ -54,7 +65,7 @@ const args = [
   'pyinstaller',
   '--noconfirm',
   '--clean',
-  '--onefile',
+  '--onedir',
   '--name',
   'capri-core',
   '--paths',
@@ -98,7 +109,6 @@ if (result.status !== 0) {
   console.error(`[sidecar] pyinstaller failed (status ${result.status})`)
   process.exit(result.status ?? 1)
 }
-const binary = path.join(resources, outputName)
 if (!existsSync(binary)) {
   console.error(`[sidecar] expected ${binary}, but it is missing`)
   process.exit(1)
