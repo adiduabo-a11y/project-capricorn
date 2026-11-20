@@ -80,7 +80,7 @@ rmSync(path.join(resources, outputName), { force: true })
 // from whatever the developer's venv happens to hold: a clean checkout used to
 // build fine and ship without voice, speech-to-text or canvas OCR, because
 // PyInstaller follows the lazy imports only when the packages are installed.
-const EXTRAS = ['screen', 'stt', 'ocr', 'kokoro', 'pocket']
+const EXTRAS = ['screen', 'stt', 'ocr', 'kokoro', 'pocket', 'piper']
 
 // What the packaged sidecar must contain for the tools to work. Checked against
 // PyInstaller's analysis below, so a missing backend fails the build instead of
@@ -95,6 +95,7 @@ const REQUIRED_MODULES = [
   ['kokoro_onnx', 'Capri voice, full styles'],
   ['sherpa_onnx', 'Capri voice, the voice pack'],
   ['pocket_tts', 'Capri voice, the Pocket engine'],
+  ['piper', 'Capri voice, the Piper engine'],
 ]
 
 // Massive unused modules from PyTorch, test frameworks, and UI that slow down analysis
@@ -144,6 +145,10 @@ const args = [
   // own package directory, so the non-Python files have to travel with it.
   '--collect-data',
   'uiautomation',
+  '--collect-data',
+  'piper',
+  '--collect-binaries',
+  'onnxruntime',
   '--hidden-import',
   'capri_core.agent.fake',
   path.join(here, 'sidecar_entry.py'),
