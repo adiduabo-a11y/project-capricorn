@@ -457,6 +457,55 @@ async def test_request_shape() -> None:
         await router.aclose()
 
 
+async def test_separate_endpoints() -> None:
+    calls: list[tuple[str, dict]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((str(request.url), json.loads(request.content)))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"thought":"done","tool":"done","final":"yes"}'
+                        }
+                    }
+                ],
+                "data": [{"index": 0, "embedding": [0.1] * 16}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    config = CapriConfig()
+    config.models.endpoint = "http://main.test/v1"
+    config.models.model = "main-model"
+    config.models.decision_endpoint = "http://decision.test/v1"
+    config.models.decision_model = "small-fast"
+    config.models.embed.endpoint = "http://embed.test/v1"
+    config.models.embed.dim = 16
+
+    embedder = EndpointEmbedder(config)
+    check(embedder._base == "http://embed.test/v1", "embedder uses custom embed endpoint")
+
+    router = Router(config.models)
+    router._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await router.complete([Msg("user", "think")], role="planner")
+        check(calls[-1][0] == "http://main.test/v1/chat/completions", "planner complete routes to main endpoint")
+        check(calls[-1][1].get("model") == "main-model", "planner complete uses main model")
+
+        await router.complete([Msg("user", "decide")], role="decision")
+        check(calls[-1][0] == "http://decision.test/v1/chat/completions", "decision complete routes to decision endpoint")
+        check(calls[-1][1].get("model") == "small-fast", "decision complete uses decision model")
+
+        await router.decide([Msg("user", "what to do")], [])
+        check(calls[-1][0] == "http://decision.test/v1/chat/completions", "decide() routes to decision endpoint")
+        check(calls[-1][1].get("model") == "small-fast", "decide() uses decision model")
+    finally:
+        await router.aclose()
+
+
 async def main() -> int:
     print("defaults")
     test_defaults()
@@ -479,6 +528,8 @@ async def main() -> int:
     await test_server_error_does_not_retry()
     print("request shape")
     await test_request_shape()
+    print("separate endpoints")
+    await test_separate_endpoints()
 
     print()
     if FAILURES:

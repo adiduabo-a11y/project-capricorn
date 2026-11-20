@@ -380,8 +380,16 @@ class TurnRunner:
             except Exception:
                 log.exception("vault recall failed; continuing without it")
 
-        messages = self._history(memory_block, documents_block, request=text, notes=note_ctx)
-        specs = self.registry.specs()
+        all_specs = self.registry.specs()
+        recent_msgs = self.session.recent_messages(self.config.agent.history_messages)
+        hidden_mcp = prompt.mcp_hidden_tools(all_specs, request=text, history=recent_msgs)
+        messages = self._history(
+            memory_block,
+            documents_block,
+            request=text,
+            notes=note_ctx,
+            hidden=hidden_mcp,
+        )
         calls: dict[str, int] = {}
         seen = _Seen()
         stalled = 0
@@ -417,9 +425,28 @@ class TurnRunner:
                     )
                 )
 
+            vault = str(getattr(self.config.notes, "vault", "") or "").strip()
+            active_hidden = set(NOTE_TOOL_NAMES if not vault else ()) | hidden_mcp
+            active_mcp_servers = {
+                c.split(".")[1]
+                for c in calls
+                if c.startswith("mcp.") and len(c.split(".")) > 1
+            }
+            if active_mcp_servers:
+                active_hidden = {
+                    h
+                    for h in active_hidden
+                    if not (
+                        h.startswith("mcp.")
+                        and len(h.split(".")) > 1
+                        and h.split(".")[1] in active_mcp_servers
+                    )
+                }
+            active_specs = [s for s in all_specs if s.name not in active_hidden]
+
             try:
                 decision = await self.brain.decide(
-                    messages, specs, self.config.agent.persona_pack
+                    messages, active_specs, self.config.agent.persona_pack
                 )
             except ModelUnavailable as exc:
                 log.warning("model unavailable mid-turn: %s", exc)
@@ -857,11 +884,15 @@ class TurnRunner:
         documents: str = "",
         request: str = "",
         notes: prompt.NotesContext | None = None,
+        hidden: Collection[str] = (),
     ) -> list[Msg]:
         # A note tool with no vault behind it can only fail, so it is not
         # advertised: the registry keeps it callable and the error says what to
         # do, but the index is budget and this would be spent for nothing.
         vault = str(getattr(self.config.notes, "vault", "") or "").strip()
+        combined_hidden = set(hidden)
+        if not vault:
+            combined_hidden.update(NOTE_TOOL_NAMES)
         system = prompt.system_prompt(
             self.registry.specs(),
             self.config.agent.persona_pack,
@@ -875,7 +906,7 @@ class TurnRunner:
             # What she is allowed to reach on this machine, so "open it" has an
             # answer either way instead of a guess and a refusal.
             apps=tuple(getattr(self.policy.cfg, "screen_allow_apps", ()) or ()),
-            hidden=() if vault else NOTE_TOOL_NAMES,
+            hidden=combined_hidden,
         )
         messages = [Msg("system", system)]
         budget = max(

@@ -68,9 +68,16 @@ class EndpointEmbedder:
             await self._client.aclose()
             self._client = None
 
+    @property
+    def _base(self) -> str:
+        custom = self.cfg.embed.endpoint.strip()
+        if custom:
+            return custom.rstrip("/")
+        return self.cfg.endpoint.strip().rstrip("/")
+
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         out: list[list[float]] = []
-        base = self.cfg.endpoint.rstrip("/")
+        base = self._base
         for start in range(0, len(texts), BATCH):
             batch = [text or " " for text in texts[start : start + BATCH]]
             payload: dict[str, Any] = {"input": batch}

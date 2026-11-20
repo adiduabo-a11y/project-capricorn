@@ -375,6 +375,9 @@ function BrainPanel({
   const prop = (key: string): JsonSchema => modelSchema.properties?.[key] ?? {}
   const endpoint = valueAt(config, ['models', 'endpoint'])
   const model = valueAt(config, ['models', 'model'])
+  const decisionEndpoint = valueAt(config, ['models', 'decision_endpoint'])
+  const decisionModel = valueAt(config, ['models', 'decision_model'])
+  const embedEndpoint = valueAt(config, ['models', 'embed', 'endpoint'])
   const structured = String(valueAt(config, ['models', 'structured']) ?? 'json_schema')
   const disabled = saving !== null
   const configured = String(endpoint ?? '').trim().length > 0
@@ -446,6 +449,66 @@ function BrainPanel({
             />
           </label>
           {saving === 'models.model' ? (
+            <span className="set-saving">saving…</span>
+          ) : null}
+        </div>
+
+        <div className="set-field-wide">
+          <label className="set-field">
+            <span className="set-label">Decision Server URL (Optional)</span>
+            <span className="set-help">
+              Dedicated endpoint for decision &amp; fast routing. Leave blank to use main server.
+            </span>
+            <DraftInput
+              schema={prop('decision_endpoint')}
+              value={decisionEndpoint}
+              nullable={false}
+              disabled={disabled}
+              placeholder="e.g. http://127.0.0.1:8080/v1 (optional)"
+              onSave={(next) => onSave(['models', 'decision_endpoint'], next)}
+            />
+          </label>
+          {saving === 'models.decision_endpoint' ? (
+            <span className="set-saving">saving…</span>
+          ) : null}
+        </div>
+
+        <div className="set-field-wide">
+          <label className="set-field">
+            <span className="set-label">Decision Model ID (Optional)</span>
+            <span className="set-help">
+              Smaller fast model ID for quick decisions and routing. Leave blank to use main model.
+            </span>
+            <DraftInput
+              schema={prop('decision_model')}
+              value={decisionModel}
+              nullable={false}
+              disabled={disabled}
+              placeholder="e.g. qwen2.5-1.5b-instruct (optional)"
+              onSave={(next) => onSave(['models', 'decision_model'], next)}
+            />
+          </label>
+          {saving === 'models.decision_model' ? (
+            <span className="set-saving">saving…</span>
+          ) : null}
+        </div>
+
+        <div className="set-field-wide">
+          <label className="set-field">
+            <span className="set-label">Embedding Server URL (Optional)</span>
+            <span className="set-help">
+              Dedicated endpoint for embeddings. Leave blank to use main server.
+            </span>
+            <DraftInput
+              schema={prop('embed_endpoint')}
+              value={embedEndpoint}
+              nullable={false}
+              disabled={disabled}
+              placeholder="e.g. http://127.0.0.1:8081/v1 (optional)"
+              onSave={(next) => onSave(['models', 'embed', 'endpoint'], next)}
+            />
+          </label>
+          {saving === 'models.embed.endpoint' ? (
             <span className="set-saving">saving…</span>
           ) : null}
         </div>

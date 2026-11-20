@@ -54,15 +54,19 @@ The version must match in three places: `services/core/capri_core/__init__.py`,
 `package-lock.json`.
 
 ```powershell
-npm --workspace @capri/desktop run sidecar   # PyInstaller onedir -> apps/desktop/resources/capri-core/
-npm run dist                                 # build + sidecar + NSIS installer
+npm --workspace @capri/desktop run sidecar         # PyInstaller onedir -> apps/desktop/resources/capri-core/
+npm --workspace @capri/desktop run sidecar:clean   # force clean cache rebuild
+npm run dist                                       # build + sidecar + NSIS installer
+npm run dist:fast                                  # fast installer packaging (uncompressed store)
 ```
 
 The sidecar is **onedir**, not onefile: onefile unpacks the whole payload
 (~426 MB with torch, for Pocket's voice) on every launch, which measured ~18 s
 before the daemon could print its version, against 3.5 s from launch to socket
-as onedir. Rebuild the sidecar after any change under `services/core`, or the
-installer ships the old daemon.
+as onedir. `build-sidecar.mjs` caches module analysis incrementally, excludes
+unused test/distributed packages (like `torch.distributed`), and automatically
+skips rebuilding when the existing binary is newer than all core sources. Use
+`sidecar:clean` or pass `--force` to force a rebuild.
 
 Artifacts land in `apps/desktop/release/` (gitignored). A release needs three of
 them attached to the matching tag — `Project-Capricorn-Setup-<version>.exe`, its

@@ -81,6 +81,8 @@ let petMouth = null
 let petListening = false
 // Last hit-test answer from the pet: true when the pointer is over her.
 let petPointerInteractive = false
+let petDragging = false
+let petWatchdogTimer = null
 let agentState = 'idle'
 let quitting = false
 let tray = null
@@ -433,8 +435,48 @@ function windowControl(action) {
   }
 }
 
+function startPetWatchdog() {
+  if (petWatchdogTimer) return
+  petWatchdogTimer = setInterval(() => {
+    if (!petWin || petWin.isDestroyed() || !petWin.isVisible() || !petSprite) return
+    if (petDragging) return
+    try {
+      const cursor = screen.getCursorScreenPoint()
+      const overlay = petWin.getBounds()
+      const spriteX = overlay.x + petSprite.x
+      const spriteY = overlay.y + petSprite.y
+      const pad = 12
+      const inside =
+        cursor.x >= spriteX - pad &&
+        cursor.x <= spriteX + petSprite.width + pad &&
+        cursor.y >= spriteY - pad &&
+        cursor.y <= spriteY + petSprite.height + pad
+
+      if (inside && !petPointerInteractive) {
+        petPointerInteractive = true
+        petWin.setIgnoreMouseEvents(false)
+      } else if (!inside && petPointerInteractive) {
+        const farPad = 36
+        const farOutside =
+          cursor.x < spriteX - farPad ||
+          cursor.x > spriteX + petSprite.width + farPad ||
+          cursor.y < spriteY - farPad ||
+          cursor.y > spriteY + petSprite.height + farPad
+        if (farOutside) {
+          petPointerInteractive = false
+          petWin.setIgnoreMouseEvents(true, { forward: true })
+        }
+      }
+    } catch {
+      /* ignore screen point query errors */
+    }
+  }, 80)
+}
+
 function resetPetClickThrough() {
   if (!petWin || petWin.isDestroyed()) return
+  petDragging = false
+  petPointerInteractive = false
   petWin.setIgnoreMouseEvents(true, { forward: true })
   petWin.webContents.send('capri:pet-reset')
 }
@@ -1177,8 +1219,12 @@ function createPetWindow() {
   petWin.on('closed', () => {
     petWin = null
     petReady = false
+    petDragging = false
+    petPointerInteractive = false
     updateTray()
   })
+
+  startPetWatchdog()
 
   const target = petUrl()
   console.log(`[shell] loading pet ${target}`)
@@ -1415,9 +1461,19 @@ ipcMain.on('capri:pet-ready', (event) => {
 
 ipcMain.on('capri:pet-pointer', (event, interactive) => {
   if (!petWin || petWin.isDestroyed() || event.sender !== petWin.webContents) return
+  if (petDragging) return
   petPointerInteractive = !!interactive
   if (isSmoke) console.log(`[smoke] pet pointer ${petPointerInteractive}`)
   petWin.setIgnoreMouseEvents(!interactive, { forward: true })
+})
+
+ipcMain.on('capri:pet-drag', (event, dragging) => {
+  if (!petWin || petWin.isDestroyed() || event.sender !== petWin.webContents) return
+  petDragging = !!dragging
+  if (petDragging) {
+    petPointerInteractive = true
+    petWin.setIgnoreMouseEvents(false)
+  }
 })
 
 ipcMain.on('capri:mouth', (event, viseme) => {

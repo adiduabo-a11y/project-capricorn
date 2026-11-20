@@ -6,13 +6,13 @@ import { FORM_HANDOFF_MS, FormArrival } from './FormArrival'
 import { RibbonTrip } from './RibbonTrip'
 import './pet.css'
 
-const PET_W = 200
-const PET_H = 300
-// The seated art hangs 176 CSS px below her feet line (a 228 canvas px clip
-// shift at the stage's 0.78 scale). The canvas grows by this much to draw it.
-const PERCH_ROOM = 180
+const PET_W = 150
+const PET_H = 225
+// The seated art hangs below her feet line (scaled to match the stage).
+// The canvas grows by this much to draw it.
+const PERCH_ROOM = 135
 // The pose gate: the room above the taskbar she needs for a seat to read as one.
-const PERCH_GATE = 190
+const PERCH_GATE = 142
 // Travel speed is per trip, not a constant: a fixed 64 px/s walk is the least
 // alive thing a character can do.
 const SPEED = 64
@@ -35,17 +35,17 @@ const TELEPORT_CHANCE = 0.3
 
 // The seated clips are the pack's reference size, so they still fill the actor
 // box: the hit region there is the box itself.
-const HIT = { left: 30, top: 4, width: 140, height: 294 }
+const HIT = { left: 22, top: 3, width: 105, height: 220 }
 // Standing clips carry a clip scale to match the perch art, so she is drawn
 // above and past the sides of the box. `onInk` reports the art's real bounds
 // every frame and that is what the window follows; these two boxes are only the
 // fallback for the frames before the stage has drawn her.
-const SPRITE_RISE = 160
-const HIT_STANDING = { left: -70, top: -SPRITE_RISE, width: 340, height: 294 + SPRITE_RISE }
+const SPRITE_RISE = 120
+const HIT_STANDING = { left: -52, top: -SPRITE_RISE, width: 255, height: 220 + SPRITE_RISE }
 // Canvas room for that art, in CSS px: CapriStage fits the pack canvas to the
-// 200x300 box, so these margins add drawing space, not magnification.
-const STAGE_RISE = 200
-const STAGE_SIDE = 80
+// 150x225 box, so these margins add drawing space, not magnification.
+const STAGE_RISE = 150
+const STAGE_SIDE = 60
 
 type Mode = 'idle' | 'walk' | 'drag' | 'fall'
 type Reaction = 'arriving' | 'leaving' | 'clicked' | 'dancing' | 'waking' | 'annoyed' | null
@@ -276,8 +276,8 @@ export function Pet() {
     const p = pos.current
     const art = spriteRect.current
     if (art) {
-      // A few pixels of grace so the outline is not a pixel hunt.
-      const pad = 3
+      // A generous pad of grace so the outline is easy to grab.
+      const pad = 8
       return (
         x >= p.x + art.left - pad &&
         x <= p.x + art.left + art.width + pad &&
@@ -979,6 +979,7 @@ export function Pet() {
     setReaction(null)
     setModeSafe('drag')
     setInteractive(true)
+    capri.petDrag?.(true)
     applyPosition()
   }
 
@@ -1002,43 +1003,66 @@ export function Pet() {
     applyPosition()
   }
 
-  const finishPointer = (event: React.PointerEvent<HTMLDivElement>, cancelled = false) => {
-    const held = drag.current
-    if (!held || held.pointerId !== event.pointerId) return
-    drag.current = null
-    try {
-      actorRef.current?.releasePointerCapture(event.pointerId)
-    } catch {
-      /* capture already released */
-    }
+  const finishPointer = useCallback(
+    (event?: React.PointerEvent<HTMLDivElement> | PointerEvent, cancelled = false) => {
+      const held = drag.current
+      if (!held) return
+      drag.current = null
+      capri.petDrag?.(false)
+      try {
+        if (event && 'pointerId' in event) {
+          actorRef.current?.releasePointerCapture(event.pointerId)
+        }
+      } catch {
+        /* capture already released */
+      }
 
-    if (!cancelled && !held.moved) {
-      if (forcedSleepRef.current) {
-        setForcedSleep(false)
-        setReaction('waking')
-      } else if (!poke(performance.now())) {
-        setReaction('clicked')
+      if (!cancelled && !held.moved) {
+        if (forcedSleepRef.current) {
+          setForcedSleep(false)
+          setReaction('waking')
+        } else if (!poke(performance.now())) {
+          setReaction('clicked')
+        }
+        setModeSafe('idle')
+        idleAt.current = performance.now() + 2200
+      } else if (anchoredRef.current) {
+        const p = pos.current
+        p.y = clamp(p.y, 0, p.baseY)
+        velocity.current = { x: 0, y: 0 }
+        setModeSafe('idle')
+        idleAt.current = performance.now() + 2200
+        applyPosition()
+        savePosition()
+      } else {
+        velocity.current = {
+          x: clamp(held.vx, -900, 900),
+          y: clamp(held.vy, -500, 900),
+        }
+        setModeSafe('fall')
+        savePosition()
       }
-      setModeSafe('idle')
-      idleAt.current = performance.now() + 2200
-    } else if (anchoredRef.current) {
-      const p = pos.current
-      p.y = clamp(p.y, 0, p.baseY)
-      velocity.current = { x: 0, y: 0 }
-      setModeSafe('idle')
-      idleAt.current = performance.now() + 2200
-      applyPosition()
-      savePosition()
-    } else {
-      velocity.current = {
-        x: clamp(held.vx, -900, 900),
-        y: clamp(held.vy, -500, 900),
-      }
-      setModeSafe('fall')
-      savePosition()
+      const cx = event ? event.clientX : pointer.current.x
+      const cy = event ? event.clientY : pointer.current.y
+      setInteractive(hitTest(cx, cy))
+    },
+    [applyPosition, hitTest, poke, savePosition, setInteractive, setModeSafe],
+  )
+
+  useEffect(() => {
+    const onWindowBlur = () => {
+      if (drag.current) finishPointer(undefined, true)
     }
-    setInteractive(hitTest(event.clientX, event.clientY))
-  }
+    const onWindowPointerUp = (e: PointerEvent) => {
+      if (drag.current) finishPointer(e, false)
+    }
+    window.addEventListener('blur', onWindowBlur)
+    window.addEventListener('pointerup', onWindowPointerUp)
+    return () => {
+      window.removeEventListener('blur', onWindowBlur)
+      window.removeEventListener('pointerup', onWindowPointerUp)
+    }
+  }, [finishPointer])
 
   const state =
     mode === 'drag' || mode === 'fall'
@@ -1098,6 +1122,7 @@ export function Pet() {
         aria-label="Capri, your desktop companion. Drag to move her, double-click to open her panel."
         title="Capri — drag me, double-click to talk"
         onPointerDown={onPointerDown}
+        onLostPointerCapture={() => finishPointer(undefined, true)}
         onDoubleClick={() => void capri.windowControl('show')}
         onContextMenu={(event) => {
           event.preventDefault()

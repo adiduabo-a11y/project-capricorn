@@ -209,10 +209,11 @@ def work_block(work: WorkContext | None) -> str:
 
 _CODING = """## Working on code
 
-- Locate before editing: fs.grep for symbols, never guess a path. fs.patch edits,
-  fs.write only creates; keep diffs small and leave unrelated files alone.
+- Touch files only when changes are needed; for advice, answer with done.
+  Locate before editing: fs.grep for symbols, never guess a path. fs.patch edits,
+  fs.write creates; keep diffs small and leave unrelated files alone.
 - Prove it with the narrowest check, read a failure and make one focused
-  correction. After three failed attempts, report the blocker.
+  correction. After three failures, report the blocker.
 - Do not claim a test passed unless you ran it in this turn.
 - Never run git commit, git checkout, git reset or git clean unless asked."""
 
@@ -264,8 +265,8 @@ You work in steps. Each step you emit exactly one JSON object and nothing else:
 
 {"thought": "<one short sentence, in character>", "tool": "<tool name or done>", "final": "<reply text>"}
 
-- Answer with "done" and the reply in "final"; act by naming a tool and leaving
-  "final" empty. One thing per step, then wait.
+- Answer questions with "done" and the reply in "final"; act by naming a tool
+  only when an action is required, leaving "final" empty. One thing per step.
 - "thought" is never shown to the user. One sentence.
 - Each action returns "[observation from <tool>]": the result, not the user
   speaking. Read it, then take the next step. Never repeat a call with the same
@@ -374,6 +375,57 @@ def apps_block(apps: Sequence[str], specs: list[ToolSpec]) -> str:
         "every other app, so do not offer to work in one: say it is not on the list\n"
         "and point at Settings → Mainframe to add it."
     )
+
+
+def mcp_hidden_tools(
+    specs: Sequence[ToolSpec],
+    request: str = "",
+    history: Sequence[Any] = (),
+) -> set[str]:
+    """Identify MCP tools that should be hidden from the active turn prompt.
+
+    Built-in tools are never hidden. MCP tools (names starting with 'mcp.')
+    are kept only if:
+    - The total number of registered MCP tools is 3 or fewer, OR
+    - The user request or recent history mentions 'mcp' or terms matching the
+      specific MCP server or tool name.
+    Otherwise, unmentioned MCP tools are omitted to prevent context bloat and
+    decision confusion on smaller models.
+    """
+    mcp_specs = [s for s in specs if s.name.startswith("mcp.")]
+    if not mcp_specs or len(mcp_specs) <= 3:
+        return set()
+
+    corpus = str(request or "").lower()
+    for item in history:
+        if isinstance(item, dict):
+            content = item.get("content")
+        else:
+            content = getattr(item, "content", None)
+        if isinstance(content, str):
+            corpus += " " + content.lower()
+
+    if "mcp" in corpus:
+        return set()
+
+    hidden: set[str] = set()
+    for spec in mcp_specs:
+        parts = spec.name.split(".", 2)
+        server = parts[1] if len(parts) > 1 else ""
+        tool = parts[2] if len(parts) > 2 else ""
+
+        relevant = False
+        if server and server.lower() in corpus:
+            relevant = True
+        elif tool and tool.lower().replace("_", " ") in corpus:
+            relevant = True
+        elif any(len(word) >= 4 and word in corpus for word in tool.lower().split("_")):
+            relevant = True
+
+        if not relevant:
+            hidden.add(spec.name)
+
+    return hidden
 
 
 def system_prompt(

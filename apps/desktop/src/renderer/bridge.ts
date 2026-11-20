@@ -473,6 +473,7 @@ export interface CapriBridge {
   /** Pet surface: announce readiness and report the character's hit region. */
   petReady(): void
   petPointer(interactive: boolean): void
+  petDrag?(dragging: boolean): void
   /** Sprite box in pet-window coordinates; the shell anchors the bubble to it. */
   reportPetBounds(bounds: { x: number; y: number; width: number; height: number }): void
   petMenu(state: { wander: boolean; sleeping: boolean; anchored: boolean }): void

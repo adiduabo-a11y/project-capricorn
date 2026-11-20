@@ -11,7 +11,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -27,6 +27,48 @@ const outputName = process.platform === 'win32' ? 'capri-core.exe' : 'capri-core
 const bundleDir = path.join(resources, 'capri-core')
 const binary = path.join(bundleDir, outputName)
 const addData = `${path.join(coreDir, 'capri_core/store/sql')}${path.delimiter}capri_core/store/sql`
+
+const force = process.argv.includes('--force')
+const clean = process.argv.includes('--clean')
+
+/**
+ * Returns the latest modified time across all source files in a directory.
+ */
+function getLatestMtime(dir) {
+  let latest = 0
+  try {
+    const entries = readdirSync(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      if (entry.name === '__pycache__' || entry.name === '.venv' || entry.name.startsWith('.')) continue
+      const fullPath = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        const sub = getLatestMtime(fullPath)
+        if (sub > latest) latest = sub
+      } else if (/\.(py|sql|toml)$/.test(entry.name)) {
+        const mtime = statSync(fullPath).mtimeMs
+        if (mtime > latest) latest = mtime
+      }
+    }
+  } catch {
+    /* ignore read errors */
+  }
+  return latest
+}
+
+// Check if an existing sidecar bundle is already newer than all core sources.
+if (!force && existsSync(binary)) {
+  const binaryMtime = statSync(binary).mtimeMs
+  const coreMtime = Math.max(
+    getLatestMtime(coreDir),
+    statSync(path.join(here, 'sidecar_entry.py')).mtimeMs,
+    statSync(path.join(here, 'build-sidecar.mjs')).mtimeMs,
+  )
+  if (binaryMtime > coreMtime) {
+    console.log(`[sidecar] ${outputName} is up to date (newer than core sources). Skipping PyInstaller rebuild.`)
+    console.log(`[sidecar] pass --force to build-sidecar.mjs to force a rebuild.`)
+    process.exit(0)
+  }
+}
 
 mkdirSync(resources, { recursive: true })
 mkdirSync(work, { recursive: true })
@@ -55,6 +97,18 @@ const REQUIRED_MODULES = [
   ['pocket_tts', 'Capri voice, the Pocket engine'],
 ]
 
+// Massive unused modules from PyTorch, test frameworks, and UI that slow down analysis
+const EXCLUDES = [
+  'torch.distributed',
+  'torch.testing',
+  'torch.utils.benchmark',
+  'IPython',
+  'matplotlib',
+  'tkinter',
+  'unittest',
+  'pytest',
+]
+
 const args = [
   'run',
   '--package',
@@ -64,7 +118,7 @@ const args = [
   'pyinstaller>=6.11',
   'pyinstaller',
   '--noconfirm',
-  '--clean',
+  ...(clean ? ['--clean'] : []),
   '--onedir',
   '--name',
   'capri-core',
@@ -76,6 +130,7 @@ const args = [
   work,
   '--specpath',
   work,
+  ...EXCLUDES.flatMap((mod) => ['--exclude-module', mod]),
   '--add-data',
   addData,
   '--collect-data',

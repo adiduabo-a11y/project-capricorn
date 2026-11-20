@@ -1,6 +1,6 @@
 {
   "name": "@capri/desktop",
-  "version": "0.5.12",
+  "version": "0.5.13",
   "private": true,
   "type": "module",
   "description": "Project Capricorn's projection layer: avatar, speech bubble, settings",
@@ -17,7 +17,9 @@
     "test:worklet": "npm run build && node scripts/capture-worklet-check.cjs",
     "trim": "node scripts/trim-sprites.mjs",
     "sidecar": "node scripts/build-sidecar.mjs",
+    "sidecar:clean": "node scripts/build-sidecar.mjs --force --clean",
     "dist": "npm run build && npm run sidecar && electron-builder --win nsis",
+    "dist:fast": "npm run build && npm run sidecar && electron-builder --win nsis -c.compression=store",
     "dist:dir": "npm run build && npm run sidecar && electron-builder --dir"
   },
   "dependencies": {

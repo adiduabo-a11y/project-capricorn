@@ -10,8 +10,8 @@
   position: absolute;
   top: 0;
   left: 0;
-  width: 200px;
-  height: 300px;
+  width: 150px;
+  height: 225px;
   pointer-events: auto;
   /* A barely-there surface keeps Windows hit-testing the sprite region instead
      of treating the whole transparent window as click-through. */
@@ -33,13 +33,13 @@
 .pet-actor .avatar {
   position: absolute;
   /* Standing art is drawn at a larger clip scale than the perch art, so the
-     canvas rises above the 200x300 box and reaches past its sides; CapriStage
+     canvas rises above the 150x225 box and reaches past its sides; CapriStage
      keeps the feet line at the actor's bottom and the fit measured against the
      box, so the extra room magnifies nothing. Seated art hangs below instead. */
-  top: -200px;
-  left: -80px;
-  width: 360px;
-  height: calc(100% + 380px);
+  top: -150px;
+  left: -60px;
+  width: 270px;
+  height: calc(100% + 285px);
   /* The listening rim light is allowed to spill past the sprite box. */
   overflow: visible;
 }
@@ -58,7 +58,7 @@
 }
 
 .pet-actor[data-perched='true']::after {
-  height: 180px;
+  height: 135px;
   pointer-events: auto;
 }
 

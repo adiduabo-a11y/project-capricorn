@@ -235,7 +235,12 @@ class CapriServer(
         # Her voice takes ~11 s to load (Pocket's base model plus her state).
         # Start that now, on a worker thread: the socket serves immediately and
         # her first reply after a restart does not open with that silence.
-        speech_warm = asyncio.create_task(self.voice.prewarm())
+        # If model packages are missing, ensure_models downloads them first.
+        async def _warm_voice() -> None:
+            await self.voice.ensure_models()
+            await self.voice.prewarm()
+
+        speech_warm = asyncio.create_task(_warm_voice())
         origins: list[Any] = [
             None,
             "app://capri",
@@ -734,6 +739,10 @@ class CapriServer(
             # turn is now stale, and must not cut into the reply.
             if event.get("type") == "agent.state" and event.get("state") == "speaking":
                 self.companion.note_answer(turn_id)
+            if event.get("type") == "agent.step":
+                tool = str(event.get("tool") or "")
+                if tool and tool != "done":
+                    self._note_work_line(turn_id, {"name": tool, "ok": True})
             # A reaction cannot fire mid-turn, so a finished tool call is only
             # noted here; the turn is asked for its line once it has settled.
             if event.get("type") == "agent.tool":

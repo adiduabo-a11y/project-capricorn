@@ -25,6 +25,7 @@ from .. import paths
 from ..config import CapriConfig
 from . import dsp
 from . import lexicon
+from .download import download_file
 
 log = logging.getLogger("capri.voice.tts")
 
@@ -171,12 +172,36 @@ class KokoroEngine:
 
     # ------------------------------------------------------------------ model
 
+    def ensure_files(self) -> None:
+        """Download missing Kokoro model files automatically if not present."""
+        if self.config.voice.voice_blend.a == "capri":
+            return
+        missing = self.missing_files()
+        if not missing:
+            return
+        self.directory.mkdir(parents=True, exist_ok=True)
+        for path in missing:
+            url = f"{KOKORO_RELEASE}/{path.name}"
+            log.info("auto-downloading missing voice file %s from %s", path.name, url)
+            try:
+                download_file(url, path)
+            except Exception as exc:
+                self._error = f"Failed to auto-download {path.name}: {exc}"
+                log.error("voice download failed for %s: %s", path.name, exc)
+                break
+
+    def load(self) -> object:
+        if self.config.voice.voice_blend.a == "capri":
+            return self._load_sherpa()
+        return self._load()
+
     def _load(self) -> object:
         if self._kokoro is not None:
             return self._kokoro
         with self._lock:
             if self._kokoro is not None:
                 return self._kokoro
+            self.ensure_files()
             reason = self.reason()
             if reason:
                 raise TtsUnavailable(reason)

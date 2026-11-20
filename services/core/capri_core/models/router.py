@@ -189,6 +189,7 @@ class Router:
         self._healthy: bool | None = None
         self._checked_at = 0.0
         self._probe_lock = asyncio.Lock()
+        self._request_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ http
 
@@ -207,6 +208,16 @@ class Router:
     @property
     def _base(self) -> str:
         return self.cfg.endpoint.strip().rstrip("/")
+
+    def _base_for(self, role: str) -> str:
+        if role in ("decision", "reflex", "route") and self.cfg.decision_endpoint.strip():
+            return self.cfg.decision_endpoint.strip().rstrip("/")
+        return self._base
+
+    def _model_for(self, role: str) -> str:
+        if role in ("decision", "reflex", "route") and self.cfg.decision_model.strip():
+            return self.cfg.decision_model.strip()
+        return self.cfg.model.strip()
 
     def reconfigure(self, cfg: ModelsCfg) -> None:
         """Apply a settings change and force the next health check to be fresh."""
@@ -253,13 +264,13 @@ class Router:
         max_tokens: int = 1024,
         structured: str | None = None,
     ) -> ChatResult:
-        base = self._base
+        base = self._base_for(role)
         if not base:
             raise ModelUnavailable(
                 "No brain endpoint configured. Open Settings → Brain and enter "
                 "the LM Studio or llama.cpp server URL."
             )
-        model = self.cfg.model.strip()
+        model = self._model_for(role)
         # No sampling parameters: the endpoint that runs the model owns them.
         # Determinism on the structured calls comes from the grammar and schema
         # below, not from a low temperature.
@@ -282,36 +293,37 @@ class Router:
             body["chat_template_kwargs"] = {"enable_thinking": False}
 
         started = time.monotonic()
-        try:
-            response = await self._http().post(f"{base}/chat/completions", json=body)
-        except httpx.HTTPError as exc:
-            self._healthy = False
-            raise ModelUnavailable(f"cannot reach {base}: {exc}") from exc
-
-        # Older llama.cpp servers reject response_format with 400/422 instead
-        # of ignoring it. GBNF is the native fallback on those servers; keep it
-        # to one request so a bad model or message still fails normally.
-        if (
-            response.status_code in (400, 422)
-            and "response_format" in body
-            and grammar
-        ):
-            detail = response.text[:300].replace("\n", " ")
-            log.warning(
-                "server rejected response_format with HTTP %s; retrying with "
-                "GBNF grammar: %s",
-                response.status_code,
-                detail,
-            )
-            body.pop("response_format", None)
-            body["grammar"] = grammar
+        async with self._request_lock:
             try:
-                response = await self._http().post(
-                    f"{base}/chat/completions", json=body
-                )
+                response = await self._http().post(f"{base}/chat/completions", json=body)
             except httpx.HTTPError as exc:
                 self._healthy = False
                 raise ModelUnavailable(f"cannot reach {base}: {exc}") from exc
+
+            # Older llama.cpp servers reject response_format with 400/422 instead
+            # of ignoring it. GBNF is the native fallback on those servers; keep it
+            # to one request so a bad model or message still fails normally.
+            if (
+                response.status_code in (400, 422)
+                and "response_format" in body
+                and grammar
+            ):
+                detail = response.text[:300].replace("\n", " ")
+                log.warning(
+                    "server rejected response_format with HTTP %s; retrying with "
+                    "GBNF grammar: %s",
+                    response.status_code,
+                    detail,
+                )
+                body.pop("response_format", None)
+                body["grammar"] = grammar
+                try:
+                    response = await self._http().post(
+                        f"{base}/chat/completions", json=body
+                    )
+                except httpx.HTTPError as exc:
+                    self._healthy = False
+                    raise ModelUnavailable(f"cannot reach {base}: {exc}") from exc
 
         if response.status_code >= 400:
             detail = response.text[:300].replace("\n", " ")
@@ -354,7 +366,7 @@ class Router:
         # models do constantly. The parser below supplies the stricter checks.
         grammar = gbnf.from_schema(schema)
         result = await self.complete(
-            msgs, role="planner", grammar=grammar,
+            msgs, role="decision", grammar=grammar,
             schema=schema, max_tokens=self.cfg.max_output_tokens,
         )
 
@@ -381,7 +393,7 @@ class Router:
             try:
                 repaired = await self.complete(
                     repair,
-                    role="planner",
+                    role="decision",
                     grammar=grammar,
                     schema=schema,
                     max_tokens=self.cfg.max_output_tokens,

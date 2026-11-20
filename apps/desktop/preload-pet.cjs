@@ -24,6 +24,10 @@ const petApi = {
     ipcRenderer.send('capri:pet-pointer', !!interactive)
   },
 
+  petDrag(dragging) {
+    ipcRenderer.send('capri:pet-drag', !!dragging)
+  },
+
   reportPetBounds(bounds) {
     if (!bounds || typeof bounds !== 'object') return
     ipcRenderer.send('capri:pet-bounds', {

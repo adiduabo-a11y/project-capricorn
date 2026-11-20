@@ -441,6 +441,17 @@ class VoiceService:
         await asyncio.to_thread(self.stt.warm)
         return {"loaded": True}
 
+    async def ensure_models(self) -> None:
+        """Download missing model files in the background if supported by the engine."""
+        if not self.config.voice.enabled:
+            return
+        ensure = getattr(self.engine, "ensure_files", None)
+        if callable(ensure):
+            try:
+                await asyncio.to_thread(ensure)
+            except Exception as exc:
+                log.warning("auto-download of voice files failed: %s", exc)
+
     async def prewarm(self) -> dict[str, Any]:
         """Load the speech engine off the event loop, before anyone speaks.
 

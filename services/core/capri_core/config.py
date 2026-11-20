@@ -30,6 +30,14 @@ class _Base(BaseModel):
 
 
 class EmbedCfg(_Base):
+    endpoint: str = Field(
+        default="",
+        title="Embedding server URL",
+        description=(
+            "Optional separate endpoint for embeddings (e.g. http://127.0.0.1:8081/v1). "
+            "Leave blank to use the main server URL."
+        ),
+    )
     name: str = Field(
         default="",
         title="Embedding model",
@@ -75,6 +83,22 @@ class ModelsCfg(_Base):
         description=(
             "The model identifier shown by your server's /v1/models endpoint. "
             "Use the same model for planning, replies, and background work."
+        ),
+    )
+    decision_endpoint: str = Field(
+        default="",
+        title="Decision server URL",
+        description=(
+            "Optional separate endpoint for decision/fast routing calls. "
+            "Leave blank to use the main server URL."
+        ),
+    )
+    decision_model: str = Field(
+        default="",
+        title="Decision model ID",
+        description=(
+            "Optional model ID for decision/routing (e.g. a small fast model). "
+            "Leave blank to use the main model."
         ),
     )
     # No sampling knobs: the server that runs the model owns them. A
@@ -539,9 +563,9 @@ class CompanionCfg(_Base):
         ),
     )
     # One line, then quiet for this long: a long turn is not a monologue.
-    work_interval_s: int = Field(default=45, ge=10, le=3600)
+    work_interval_s: int = Field(default=15, ge=5, le=3600)
     # A hard ceiling per turn, so a forty-step turn still sounds like a companion.
-    work_max_per_turn: int = Field(default=3, ge=1, le=10)
+    work_max_per_turn: int = Field(default=5, ge=1, le=10)
     # How much of the work is allowed into an ambient line. windows reads the
     # foreground title only; screen also lets the OCR of that window in.
     awareness: Literal["off", "windows", "screen"] = Field(

@@ -18,11 +18,13 @@ import numpy as np
 
 from .. import paths
 from ..config import CapriConfig
+from .download import download_file
 from .tts import Audio, TtsUnavailable
 
 log = logging.getLogger("capri.voice.piper")
 
 DEFAULT_VOICE = "en_US-lessac-medium"
+PIPER_RELEASE = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium"
 
 
 def voice_path(config: CapriConfig) -> Path:
@@ -71,12 +73,35 @@ class PiperEngine:
     def voices(self) -> list[str]:
         return [self.path.stem] if self.available() else []
 
+    def ensure_files(self) -> None:
+        """Download default Piper voice files automatically if missing."""
+        if self.path.stem != DEFAULT_VOICE:
+            return
+        missing = self.missing_files()
+        if not missing:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        for p in missing:
+            filename = p.name
+            url = f"{PIPER_RELEASE}/{filename}"
+            log.info("auto-downloading missing Piper voice file %s from %s", filename, url)
+            try:
+                download_file(url, p)
+            except Exception as exc:
+                self._error = f"Failed to auto-download {filename}: {exc}"
+                log.error("Piper download failed for %s: %s", filename, exc)
+                break
+
+    def load(self) -> object:
+        return self._load()
+
     def _load(self) -> object:
         if self._voice is not None:
             return self._voice
         with self._lock:
             if self._voice is not None:
                 return self._voice
+            self.ensure_files()
             reason = self.reason()
             if reason:
                 raise TtsUnavailable(reason)

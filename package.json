@@ -11,6 +11,7 @@
     "dev": "npm --workspace @capri/desktop run dev",
     "build": "npm --workspace @capri/desktop run build",
     "dist": "npm --workspace @capri/desktop run dist",
+    "dist:fast": "npm --workspace @capri/desktop run dist:fast",
     "test": "uv run python services/core/tests/run_all.py && npm --workspace @capri/desktop run typecheck && npm --workspace @capri/desktop run test:voice && npm --workspace @capri/desktop run test:worklet",
     "smoke": "npm --workspace @capri/desktop run smoke"
   },
