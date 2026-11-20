@@ -586,7 +586,7 @@ class CapriServer(
         self.rag.reconfigure(updated)
         self.notes.reconfigure(updated)
         self.workspaces.reconfigure(updated)
-        self.mcp.config = updated.mcp
+        self.mcp.config = updated
         self.voice.config = updated
         self.companion.config = updated
         if hasattr(self.brain, "reconfigure"):

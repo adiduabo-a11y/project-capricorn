@@ -15,7 +15,7 @@ import logging
 import re
 from typing import Any, Mapping
 
-from ..config import CapriConfig, McpServerCfg
+from ..config import CapriConfig, McpCfg, McpServerCfg
 from ..tools.base import ToolContext, ToolResult, ToolSpec
 from ..tools.registry import Registry
 from .client import McpClient, McpError
@@ -129,7 +129,9 @@ class McpService:
 
     @property
     def cfg(self) -> Any:
-        return self.config.mcp
+        if isinstance(self.config, McpCfg):
+            return self.config
+        return getattr(self.config, "mcp", self.config)
 
     async def start(self) -> int:
         """Start every enabled server. Returns how many came up."""

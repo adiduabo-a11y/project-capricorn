@@ -254,6 +254,48 @@ class Router:
             self._checked_at = time.monotonic()
             return self._healthy
 
+    async def _post_chat(
+        self, base: str, body: dict[str, Any], grammar: str | None = None
+    ) -> httpx.Response:
+        for attempt in range(2):
+            try:
+                response = await self._http().post(f"{base}/chat/completions", json=body)
+                break
+            except (httpx.TransportError, httpx.RemoteProtocolError, ConnectionResetError, OSError) as exc:
+                if attempt == 0:
+                    log.info("connection to %s dropped (%s); refreshing client and retrying", base, exc)
+                    if self._client is not None:
+                        old = self._client
+                        self._client = None
+                        try:
+                            await old.aclose()
+                        except Exception:
+                            pass
+                    continue
+                raise
+
+        # Older llama.cpp servers reject response_format with 400/422 instead
+        # of ignoring it. GBNF is the native fallback on those servers; keep it
+        # to one request so a bad model or message still fails normally.
+        if (
+            response.status_code in (400, 422)
+            and "response_format" in body
+            and grammar
+        ):
+            detail = response.text[:300].replace("\n", " ")
+            log.warning(
+                "server rejected response_format with HTTP %s; retrying with "
+                "GBNF grammar: %s",
+                response.status_code,
+                detail,
+            )
+            body.pop("response_format", None)
+            body["grammar"] = grammar
+            response = await self._http().post(
+                f"{base}/chat/completions", json=body
+            )
+        return response
+
     async def complete(
         self,
         msgs: list[Msg],
@@ -294,34 +336,38 @@ class Router:
 
         started = time.monotonic()
         async with self._request_lock:
+            fallback = False
+            response: httpx.Response | None = None
             try:
-                response = await self._http().post(f"{base}/chat/completions", json=body)
-            except httpx.HTTPError as exc:
-                self._healthy = False
-                raise ModelUnavailable(f"cannot reach {base}: {exc}") from exc
-
-            # Older llama.cpp servers reject response_format with 400/422 instead
-            # of ignoring it. GBNF is the native fallback on those servers; keep it
-            # to one request so a bad model or message still fails normally.
-            if (
-                response.status_code in (400, 422)
-                and "response_format" in body
-                and grammar
-            ):
-                detail = response.text[:300].replace("\n", " ")
-                log.warning(
-                    "server rejected response_format with HTTP %s; retrying with "
-                    "GBNF grammar: %s",
-                    response.status_code,
-                    detail,
-                )
-                body.pop("response_format", None)
-                body["grammar"] = grammar
-                try:
-                    response = await self._http().post(
-                        f"{base}/chat/completions", json=body
+                response = await self._post_chat(base, body, grammar)
+                if response.status_code >= 400 and (base != self._base or model != self.cfg.model):
+                    detail = response.text[:300].replace("\n", " ")
+                    log.warning(
+                        "decision endpoint %s (model=%r) returned HTTP %s: %s; falling back to main endpoint",
+                        base, model, response.status_code, detail,
                     )
-                except httpx.HTTPError as exc:
+                    fallback = True
+            except (httpx.HTTPError, OSError) as exc:
+                if base != self._base or model != self.cfg.model:
+                    log.warning(
+                        "cannot reach decision endpoint %s (%s); falling back to main endpoint",
+                        base, exc,
+                    )
+                    fallback = True
+                else:
+                    self._healthy = False
+                    raise ModelUnavailable(f"cannot reach {base}: {exc}") from exc
+
+            if fallback:
+                base = self._base
+                model = self.cfg.model.strip()
+                if model:
+                    body["model"] = model
+                else:
+                    body.pop("model", None)
+                try:
+                    response = await self._post_chat(base, body, grammar)
+                except (httpx.HTTPError, OSError) as exc:
                     self._healthy = False
                     raise ModelUnavailable(f"cannot reach {base}: {exc}") from exc
 

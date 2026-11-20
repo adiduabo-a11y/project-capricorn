@@ -506,6 +506,57 @@ async def test_separate_endpoints() -> None:
         await router.aclose()
 
 
+async def test_endpoint_fallbacks() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        body = json.loads(request.read())
+        calls.append((url, body))
+        if "decision.test" in url:
+            # Simulate decision endpoint being down / returning error
+            return httpx.Response(500, json={"error": "decision model crashed"})
+        if "embed.test" in url:
+            # Simulate embed endpoint being down
+            return httpx.Response(502, json={"error": "embed service unavailable"})
+        if "/embeddings" in url:
+            return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.1] * 16}]})
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"thought":"ok","tool":null,"final":"Recovered on main"}'}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        })
+
+    config = CapriConfig()
+    config.models.endpoint = "http://main.test/v1"
+    config.models.model = "main-model"
+    config.models.decision_endpoint = "http://decision.test/v1"
+    config.models.decision_model = "small-fast"
+    config.models.embed.endpoint = "http://embed.test/v1"
+    config.models.embed.dim = 16
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    embedder = EndpointEmbedder(config, client=mock_client)
+    router = Router(config.models)
+    router._client = mock_client
+    try:
+        # Decision call should fail on decision.test and cleanly fall back to main.test
+        res = await router.complete([Msg("user", "do fast work")], role="decision")
+        check(res.text == '{"thought":"ok","tool":null,"final":"Recovered on main"}', "recovers on main endpoint")
+        check(any("decision.test" in c[0] for c in calls), "attempted decision endpoint first")
+        check(calls[-1][0] == "http://main.test/v1/chat/completions", "fell back to main endpoint")
+        check(calls[-1][1].get("model") == "main-model", "fallback used main model")
+        check(router._healthy is not False, "router health was not poisoned by decision failure")
+
+        # Embed call should fail on embed.test and fall back to main.test
+        vecs = await embedder.embed(["hello world"])
+        check(len(vecs) == 1 and len(vecs[0]) == 16, "embedder recovered via main endpoint")
+        check(any("embed.test" in c[0] for c in calls), "attempted custom embed endpoint first")
+        check(calls[-1][0] == "http://main.test/v1/embeddings", "embedder fell back to main endpoint")
+    finally:
+        await router.aclose()
+        await embedder.aclose()
+
+
 async def main() -> int:
     print("defaults")
     test_defaults()
@@ -530,6 +581,8 @@ async def main() -> int:
     await test_request_shape()
     print("separate endpoints")
     await test_separate_endpoints()
+    print("endpoint fallbacks")
+    await test_endpoint_fallbacks()
 
     print()
     if FAILURES:

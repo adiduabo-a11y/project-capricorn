@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import time
 from collections.abc import Sequence
 from typing import Any, Protocol
 
@@ -49,12 +50,14 @@ class EndpointEmbedder:
         self.dim = self.cfg.embed.dim
         self._client = client
         self._own_client = client is None
+        self._dead_until: float = 0.0
 
     def reconfigure(self, config: CapriConfig) -> None:
         """Follow a live settings change without rebuilding the service."""
         self.cfg = config.models
         self.name = self.cfg.embed.name or "server default"
         self.dim = self.cfg.embed.dim
+        self._dead_until = 0.0
 
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -75,21 +78,68 @@ class EndpointEmbedder:
             return custom.rstrip("/")
         return self.cfg.endpoint.strip().rstrip("/")
 
+    async def _post_embed(self, base: str, payload: dict[str, Any]) -> httpx.Response:
+        for attempt in range(2):
+            try:
+                return await self._http().post(f"{base}/embeddings", json=payload)
+            except (httpx.TransportError, httpx.RemoteProtocolError, ConnectionResetError, OSError) as exc:
+                if attempt == 0 and self._own_client:
+                    if self._client is not None:
+                        old = self._client
+                        self._client = None
+                        try:
+                            await old.aclose()
+                        except Exception:
+                            pass
+                    continue
+                raise
+
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         out: list[list[float]] = []
-        base = self._base
+        custom = self.cfg.embed.endpoint.strip().rstrip("/")
+        main_base = self.cfg.endpoint.strip().rstrip("/")
+        now = time.monotonic()
+
+        # If custom embed endpoint recently failed, avoid blocking timeouts and fall back
+        if custom and now < self._dead_until:
+            base = main_base
+        else:
+            base = custom or main_base
+
+        if not base:
+            raise EmbedUnavailable("no embedding endpoint configured")
+
         for start in range(0, len(texts), BATCH):
             batch = [text or " " for text in texts[start : start + BATCH]]
             payload: dict[str, Any] = {"input": batch}
             if self.cfg.embed.name.strip():
                 payload["model"] = self.cfg.embed.name.strip()
             try:
-                response = await self._http().post(
-                    f"{base}/embeddings",
-                    json=payload,
-                )
-            except httpx.HTTPError as exc:
-                raise EmbedUnavailable(f"cannot reach {base}: {exc}") from exc
+                response = await self._post_embed(base, payload)
+                if response.status_code >= 400 and base == custom and main_base and custom != main_base:
+                    log.warning(
+                        "embed endpoint %s returned HTTP %s; falling back to %s",
+                        custom, response.status_code, main_base,
+                    )
+                    self._dead_until = time.monotonic() + 30.0
+                    base = main_base
+                    response = await self._post_embed(base, payload)
+            except (httpx.HTTPError, OSError) as exc:
+                if base == custom and main_base and custom != main_base:
+                    log.warning(
+                        "cannot reach embed endpoint %s (%s); backing off and falling back to %s",
+                        custom, exc, main_base,
+                    )
+                    self._dead_until = time.monotonic() + 30.0
+                    base = main_base
+                    try:
+                        response = await self._post_embed(base, payload)
+                    except (httpx.HTTPError, OSError) as exc2:
+                        raise EmbedUnavailable(f"cannot reach {base}: {exc2}") from exc2
+                else:
+                    if custom and base == custom:
+                        self._dead_until = time.monotonic() + 30.0
+                    raise EmbedUnavailable(f"cannot reach {base}: {exc}") from exc
             if response.status_code >= 400:
                 raise EmbedUnavailable(
                     f"embeddings returned HTTP {response.status_code}: {response.text[:200]}"
