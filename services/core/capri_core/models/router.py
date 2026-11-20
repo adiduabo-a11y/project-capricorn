@@ -43,7 +43,7 @@ PLANNER_FAILED = (
     "Say it again and I'll take another run at it."
 )
 
-_THINK = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
+_THINK = re.compile(r"<think\b[^>]*>(?:.*?</think\s*>|.*$)", re.IGNORECASE | re.DOTALL)
 _FENCE = re.compile(r"```(?:[a-zA-Z0-9_+.-]+)?\s*(.*?)```", re.DOTALL)
 
 
@@ -109,23 +109,27 @@ def _parse_decision(text: str, tools: list[str]) -> tuple[Decision | None, str]:
             reason = "the decision was not a JSON object"
             continue
 
-        raw_tool = candidate.get("tool")
-        if not isinstance(raw_tool, str) or not raw_tool.strip():
-            reason = "the decision is missing a string 'tool'"
-            continue
-        tool = raw_tool.strip()
-        if tool not in allowed:
-            reason = f"{tool!r} is not an available tool"
-            continue
-
         final = candidate.get("final", "")
         if final is None:
             final = ""
         if not isinstance(final, str):
             reason = "'final' must be a string"
             continue
-        if tool == "done" and not final.strip():
-            reason = "a 'done' decision needs a non-empty 'final'"
+
+        raw_tool = candidate.get("tool")
+        if raw_tool is None or (isinstance(raw_tool, str) and raw_tool.strip().lower() in ("none", "null", "done", "")):
+            if final.strip():
+                tool = "done"
+            else:
+                reason = "the decision is missing a string 'tool'"
+                continue
+        elif isinstance(raw_tool, str) and raw_tool.strip():
+            tool = raw_tool.strip()
+            if tool not in allowed:
+                reason = f"{tool!r} is not an available tool"
+                continue
+        else:
+            reason = "the decision is missing a string 'tool'"
             continue
 
         thought = candidate.get("thought", "")
@@ -211,7 +215,12 @@ class Router:
 
     def _base_for(self, role: str) -> str:
         if role in ("decision", "reflex", "route") and self.cfg.decision_endpoint.strip():
-            return self.cfg.decision_endpoint.strip().rstrip("/")
+            raw = self.cfg.decision_endpoint.strip().rstrip("/")
+            if raw.endswith("/chat/completions"):
+                raw = raw[:-len("/chat/completions")].rstrip("/")
+            elif raw.endswith("/systemone"):
+                raw = raw[:-len("/systemone")].rstrip("/")
+            return raw
         return self._base
 
     def _model_for(self, role: str) -> str:
@@ -253,6 +262,21 @@ class Router:
                 self._healthy = False
             self._checked_at = time.monotonic()
             return self._healthy
+
+    async def decision_available(self) -> dict[str, Any]:
+        """Probe the decision endpoint if configured."""
+        if not self.cfg.decision_endpoint.strip():
+            return {"configured": False, "online": False}
+        endpoint = self._base_for("decision")
+        if not endpoint:
+            return {"configured": False, "online": False}
+        t0 = time.monotonic()
+        try:
+            resp = await self._http().get(f"{endpoint}/models", timeout=3.0)
+            ms = round((time.monotonic() - t0) * 1000)
+            return {"configured": True, "online": resp.status_code < 400, "ms": ms}
+        except Exception:
+            return {"configured": True, "online": False}
 
     async def _post_chat(
         self, base: str, body: dict[str, Any], grammar: str | None = None
@@ -402,11 +426,71 @@ class Router:
 
     # ------------------------------------------------------------------ brain
 
+    async def _try_systemone(
+        self, base: str, model: str, msgs: list[Msg], specs: list[ToolSpec]
+    ) -> Decision | None:
+        """Attempt non-autoregressive decision via the ggml-org /v1/systemone protocol."""
+        state_parts: list[str] = []
+        for m in msgs[-6:]:
+            content = str(getattr(m, "text", getattr(m, "content", "")) or "").strip()
+            if content:
+                state_parts.append(f"{m.role}: {content}")
+        state = "\n".join(state_parts)
+
+        tools = [spec.name for spec in specs]
+        criteria: dict[str, str] = {}
+        for s in specs:
+            desc = s.description.strip().split(".")[0] if s.description else s.name
+            criteria[s.name] = desc or f"Execute {s.name}"
+        criteria["done"] = "All actions are complete or no tools are required; answer the user."
+
+        body = {
+            "model": model,
+            "state": state,
+            "questions": {
+                "tool": {
+                    "type": "choice",
+                    "instructions": "Which tool should be called next to make progress on the user request?",
+                    "criteria": criteria,
+                }
+            },
+        }
+
+        try:
+            started = time.monotonic()
+            resp = await self._http().post(f"{base}/systemone", json=body, timeout=20.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                choice = data.get("answers", {}).get("tool", {}).get("choice")
+                if choice:
+                    ms = int((time.monotonic() - started) * 1000)
+                    tokens_in = data.get("usage", {}).get("input_tokens", 0)
+                    usage = ChatResult(text="", model=model, tokens_in=tokens_in, tokens_out=0, ms=ms)
+                    if choice == "done":
+                        primary = await self.complete(msgs, role="planner", max_tokens=self.cfg.max_output_tokens)
+                        primary.ms += ms
+                        return Decision(thought="Task concluded.", tool="done", final=primary.text, usage=primary)
+                    if choice in tools:
+                        return Decision(thought=f"Selected tool: {choice}", tool=choice, final="", usage=usage)
+        except Exception as exc:
+            log.debug("systemone check skipped: %s", exc)
+            return None
+        return None
+
     async def decide(
         self, msgs: list[Msg], specs: list[ToolSpec], persona_pack: str = prompt.DEFAULT_PACK
     ) -> Decision:
         """One planner step. Returns either a tool call or the final answer."""
         tools = [spec.name for spec in specs]
+
+        # Support ggml-org non-autoregressive decision models (e.g. Laya) via /v1/systemone
+        base = self._base_for("decision")
+        model = self._model_for("decision")
+        if self.cfg.decision_model.strip() or self.cfg.decision_endpoint.strip():
+            sys1 = await self._try_systemone(base, model, msgs, specs)
+            if sys1 is not None:
+                return sys1
+
         schema = gbnf.decision_schema(tools)
         # The generic schema grammar accepts property reordering, which local
         # models do constantly. The parser below supplies the stricter checks.

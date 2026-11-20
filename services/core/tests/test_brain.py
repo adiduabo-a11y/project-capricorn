@@ -715,11 +715,12 @@ def test_work_prompt(tmp: Path) -> None:
     # Raised once from 8,350/8,980 when the three note tools landed (measured
     # 8,524/9,149): the vault is a capability she has to be able to discover,
     # and its three index lines are the whole cost of it.
+    # Raised to 8,700/9,350 when web.fetch landed.
     specs = builtin_registry().specs()
     plain = prompt_mod.system_prompt(
         specs, "kyoko", profile="focus", request="fix the failing test"
     )
-    check(len(plain) <= 8600, f"system prompt is {len(plain)} chars")
+    check(len(plain) <= 8700, f"system prompt is {len(plain)} chars")
     with_work = prompt_mod.system_prompt(
         specs,
         "kyoko",
@@ -729,7 +730,7 @@ def test_work_prompt(tmp: Path) -> None:
             workspace_id="w", task_id="t", name="p", root="C:/p"
         ),
     )
-    check(len(with_work) <= 9220, f"work prompt is {len(with_work)} chars")
+    check(len(with_work) <= 9350, f"work prompt is {len(with_work)} chars")
 
     index = prompt_mod.describe_tools(specs)
     check(

@@ -212,6 +212,7 @@ _STEP_LABELS = {
     "project.tree": "mapping the project",
     "screen.observe": "looking at the screen",
     "screen.act": "driving a window",
+    "web.fetch": "reading a web page",
 }
 
 REGISTERS = ("analyst", "gremlin", "ghost")

@@ -1,6 +1,6 @@
 [project]
 name = "capri-core"
-version = "0.5.14"
+version = "0.5.15"
 description = "Capri agent daemon: reasoning, memory, tools, voice, screen"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -9,6 +9,7 @@ dependencies = [
     "PyYAML>=6.0",
     "numpy>=2.0",
     "httpx>=0.27",
+    "pypdf>=7.1.1",
 ]
 
 [project.optional-dependencies]

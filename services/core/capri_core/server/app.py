@@ -197,6 +197,7 @@ class CapriServer(
             "voice.stop": self._voice_stop,
             "voice.barge_in": self._voice_barge_in,
             "voice.status": self._voice_status,
+            "voice.download": self._voice_download,
             "mic.route": self._mic_route,
             "screen.status": self._screen_status,
             "screen.pause": self._screen_pause,
@@ -535,11 +536,24 @@ class CapriServer(
     async def _turn_cancel(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
         session = self._require_session(client)
         turn_id = str(params.get("turnId") or "")
-        task = session.turns.get(turn_id)
-        if task is None:
-            raise RpcError("not_found", f"no active turn {turn_id!r}")
-        task.cancel()
-        return {"cancelled": turn_id}
+        tasks_to_cancel: list[asyncio.Task] = []
+        if not turn_id:
+            tasks_to_cancel = [t for t in session.turns.values() if not t.done()]
+            session.cancel_all()
+        else:
+            task = session.turns.get(turn_id)
+            if task is not None:
+                tasks_to_cancel = [task]
+                task.cancel()
+            elif session.turns:
+                tasks_to_cancel = [t for t in session.turns.values() if not t.done()]
+                session.cancel_all()
+        if tasks_to_cancel:
+            with contextlib.suppress(Exception):
+                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+        with contextlib.suppress(Exception):
+            await self.voice.stop("cancel")
+        return {"cancelled": turn_id or "all"}
 
     async def _config_get(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
         return self.config.model_dump(mode="json")
@@ -785,6 +799,8 @@ class CapriServer(
             self._spawn_reaction_flush()
         except asyncio.CancelledError:
             log.info("turn %s cancelled", turn_id)
+            with contextlib.suppress(Exception):
+                await client.send(protocol.state("idle", "cancelled"))
             raise
         except Exception:
             log.exception("turn %s failed", turn_id)
@@ -913,14 +929,29 @@ class CapriServer(
         return {"confirmId": confirm_id, "approved": approved}
 
     async def _models_status(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
+        decision_status = (
+            await self.brain.decision_available()
+            if hasattr(self.brain, "decision_available")
+            else {"configured": False, "online": False}
+        )
+        embed_status = (
+            await self.memory.embedder.available()
+            if hasattr(self.memory.embedder, "available")
+            else {"configured": False, "online": False}
+        )
         return {
             "endpoint": self.config.models.endpoint,
             "online": await self.brain.available(),
             "model": self.config.models.model,
             "structured": self.config.models.structured,
+            "decisionEndpoint": self.config.models.decision_endpoint,
+            "decisionModel": self.config.models.decision_model,
+            "decisionStatus": decision_status,
+            "embedEndpoint": self.config.models.embed.endpoint,
             "embed": self.config.models.embed.name,
             "embedDim": self.config.models.embed.dim,
             "embedMode": self.config.memory.embed,
+            "embedStatus": embed_status,
         }
 
     async def _scheduler_status(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:

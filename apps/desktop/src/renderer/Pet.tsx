@@ -32,6 +32,7 @@ const POS_Y_KEY = 'capri.pet.y'
 const WANDER_KEY = 'capri.pet.wander'
 const ANCHOR_KEY = 'capri.pet.anchor'
 const TELEPORT_CHANCE = 0.3
+const SNAP_DISTANCE = 24
 
 // The seated clips are the pack's reference size, so they still fill the actor
 // box: the hit region there is the box itself.
@@ -998,8 +999,18 @@ export function Pet() {
     }
 
     const p = pos.current
-    p.x = clamp(event.clientX - held.offsetX, 0, Math.max(0, window.innerWidth - PET_W))
-    p.y = clamp(event.clientY - held.offsetY, -PET_H * 0.45, window.innerHeight - 36)
+    const maxX = Math.max(0, window.innerWidth - PET_W)
+    let nextX = event.clientX - held.offsetX
+    let nextY = event.clientY - held.offsetY
+
+    if (nextX < SNAP_DISTANCE) nextX = 0
+    else if (nextX > maxX - SNAP_DISTANCE) nextX = maxX
+
+    if (Math.abs(nextY - p.baseY) < SNAP_DISTANCE) nextY = p.baseY
+    else if (nextY < SNAP_DISTANCE && nextY >= 0) nextY = 0
+
+    p.x = clamp(nextX, 0, maxX)
+    p.y = clamp(nextY, -PET_H * 0.45, window.innerHeight - 36)
     applyPosition()
   }
 
@@ -1035,11 +1046,24 @@ export function Pet() {
         applyPosition()
         savePosition()
       } else {
-        velocity.current = {
-          x: clamp(held.vx, -900, 900),
-          y: clamp(held.vy, -500, 900),
+        const p = pos.current
+        const maxX = Math.max(0, window.innerWidth - PET_W)
+        if (p.x < SNAP_DISTANCE) p.x = 0
+        else if (p.x > maxX - SNAP_DISTANCE) p.x = maxX
+
+        if (Math.abs(p.y - p.baseY) < SNAP_DISTANCE) {
+          p.y = p.baseY
+          velocity.current = { x: 0, y: 0 }
+          setModeSafe('idle')
+          idleAt.current = performance.now() + 2200
+          applyPosition()
+        } else {
+          velocity.current = {
+            x: clamp(held.vx, -900, 900),
+            y: clamp(held.vy, -500, 900),
+          }
+          setModeSafe('fall')
         }
-        setModeSafe('fall')
         savePosition()
       }
       const cx = event ? event.clientX : pointer.current.x

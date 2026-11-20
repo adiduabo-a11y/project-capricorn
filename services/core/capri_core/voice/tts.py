@@ -377,29 +377,31 @@ class UnavailableEngine:
         raise TtsUnavailable(self._message)
 
 
+def build_engine_by_name(config: CapriConfig, name: str) -> TtsEngine:
+    kind = (name or "").lower().strip()
+    if kind == "tone":
+        return ToneEngine(config)
+    if kind == "kokoro":
+        return KokoroEngine(config)
+    if kind == "piper":
+        from .piper import PiperEngine
+        return PiperEngine(config)
+    if kind == "chatterbox":
+        from .clone import ChatterboxEngine
+        return ChatterboxEngine(config)
+    if kind == "pocket":
+        from .pocket import PocketEngine
+        return PocketEngine(config)
+    return UnavailableEngine(
+        kind,
+        f"{kind} is not implemented yet; set voice.tts to kokoro, piper, pocket, chatterbox or tone",
+    )
+
+
 def build_engine(config: CapriConfig) -> TtsEngine:
     if config.voice.tts == "tone":
         log.info("voice engine: tone (offline placeholder)")
-        return ToneEngine(config)
-    if config.voice.tts == "kokoro":
-        return KokoroEngine(config)
-    if config.voice.tts == "piper":
-        from .piper import PiperEngine
-
-        return PiperEngine(config)
-    if config.voice.tts == "chatterbox":
-        # Imported here so the default path never touches torch-adjacent modules.
-        from .clone import ChatterboxEngine
-
-        return ChatterboxEngine(config)
-    if config.voice.tts == "pocket":
-        from .pocket import PocketEngine
-
-        return PocketEngine(config)
-    return UnavailableEngine(
-        config.voice.tts,
-        f"{config.voice.tts} is not implemented yet; set voice.tts to kokoro, piper, pocket, chatterbox or tone",
-    )
+    return build_engine_by_name(config, config.voice.tts)
 
 
 def active_voice(config: CapriConfig) -> str:

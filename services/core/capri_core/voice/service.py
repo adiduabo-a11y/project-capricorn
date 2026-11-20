@@ -23,7 +23,7 @@ from . import dsp, wav as wav_mod
 from .calibrate import barge_threshold, confidence_gate, measure
 from .commands import match_command
 from .stt import SttUnavailable, build_stt
-from .tts import TtsEngine, TtsUnavailable, active_voice
+from .tts import TtsEngine, TtsUnavailable, active_voice, build_engine_by_name
 from .visemes import DEFAULT_FPS, schedule
 from .wake import acknowledge, address_only, match_wake
 
@@ -154,6 +154,7 @@ class VoiceService:
         self.engine = engine
         self.conn = conn
         self.stt = stt if stt is not None else build_stt(config)
+        self._fallback_engine: TtsEngine | None = None
         self._stop = asyncio.Event()
         self._stop_reason = "cancel"
         self._busy = False
@@ -170,17 +171,38 @@ class VoiceService:
 
     # ------------------------------------------------------------------ status
 
+    def _effective_engine(self) -> TtsEngine:
+        if self.engine.available():
+            return self.engine
+        if self._fallback_engine is not None and self._fallback_engine.available():
+            return self._fallback_engine
+        candidates = ["pocket", "piper", "kokoro"]
+        for name in candidates:
+            if name == self.engine.name:
+                continue
+            try:
+                alt = build_engine_by_name(self.config, name)
+                if alt.available():
+                    log.info("speech engine %s unavailable; falling back to %s", self.engine.name, alt.name)
+                    self._fallback_engine = alt
+                    return alt
+            except Exception:
+                continue
+        return self.engine
+
     def status(self) -> dict[str, Any]:
+        engine = self._effective_engine()
         payload: dict[str, Any] = {
-            "engine": self.engine.name,
-            "available": self.engine.available(),
-            "reason": self.engine.reason(),
-            "sampleRate": self.engine.sample_rate,
+            "engine": engine.name,
+            "configuredEngine": self.engine.name,
+            "available": engine.available(),
+            "reason": engine.reason(),
+            "sampleRate": engine.sample_rate,
             "voice": active_voice(self.config),
             "speed": self.config.voice.speed,
             "queueDepth": self.config.voice.queue_depth,
             "visemeFps": self.config.voice.viseme_fps,
-            "voices": self.engine.voices() if self.engine.available() else [],
+            "voices": engine.voices() if engine.available() else [],
             "bargeIn": self.config.voice.barge_in,
             "bargeThreshold": self.config.voice.barge_threshold,
             "bargeHoldMs": self.config.voice.barge_hold_ms,
@@ -196,7 +218,7 @@ class VoiceService:
             "stt": self.stt.status() if self.stt is not None else {"available": False},
         }
         for attribute, key in (("reference", "reference"), ("voice_file", "voiceFile")):
-            path = getattr(self.engine, attribute, None)
+            path = getattr(engine, attribute, None)
             if path is not None:
                 payload[key] = str(path)
                 payload[key + "Ready"] = bool(getattr(path, "is_file", lambda: False)())
@@ -216,8 +238,9 @@ class VoiceService:
         if not self.config.voice.enabled:
             return {"segments": 0, "reason": "disabled"}
 
-        reason = self.engine.reason()
-        if not self.engine.available():
+        engine = self._effective_engine()
+        reason = engine.reason()
+        if not engine.available():
             log.warning("speech skipped: %s", reason)
             return {"segments": 0, "reason": reason}
 
@@ -273,7 +296,7 @@ class VoiceService:
                         break
                     try:
                         audio = await asyncio.to_thread(
-                            self._synthesize, _spoken(sentence)
+                            self._synthesize, _spoken(sentence), engine
                         )
                     except TtsUnavailable as exc:
                         log.warning("segment %d failed: %s", index, exc)
@@ -363,7 +386,7 @@ class VoiceService:
                 name="voice.speak",
                 turn_id=turn_id,
                 payload={
-                    "engine": self.engine.name,
+                    "engine": engine.name,
                     "segments": stats["segments"],
                     "chars": stats["chars"],
                     "ms": stats["ms"],
@@ -451,6 +474,35 @@ class VoiceService:
                 await asyncio.to_thread(ensure)
             except Exception as exc:
                 log.warning("auto-download of voice files failed: %s", exc)
+
+    async def download_models(self, engine_name: str | None = None) -> dict[str, Any]:
+        """Trigger downloading model files for the specified or configured engine."""
+        target_name = (engine_name or self.engine.name).lower().strip()
+        eng = self.engine if target_name == self.engine.name else build_engine_by_name(self.config, target_name)
+        ensure = getattr(eng, "ensure_files", None)
+        if not callable(ensure):
+            return {
+                "engine": target_name,
+                "supported": False,
+                "downloaded": False,
+                "reason": f"{target_name} does not support automatic downloads",
+            }
+        try:
+            await asyncio.to_thread(ensure)
+            return {
+                "engine": target_name,
+                "supported": True,
+                "downloaded": True,
+                "available": eng.available(),
+                "reason": eng.reason(),
+            }
+        except Exception as exc:
+            return {
+                "engine": target_name,
+                "supported": True,
+                "downloaded": False,
+                "error": str(exc),
+            }
 
     async def prewarm(self) -> dict[str, Any]:
         """Load the speech engine off the event loop, before anyone speaks.
@@ -632,8 +684,9 @@ class VoiceService:
             db.trace(self.conn, span="voice", name="voice.follow_up.rejected", payload=rejection)
         return {**result, "accepted": False, "reason": reason}
 
-    def _synthesize(self, sentence: str):
-        return self.engine.synthesize(
+    def _synthesize(self, sentence: str, engine: TtsEngine | None = None):
+        eng = engine or self._effective_engine()
+        return eng.synthesize(
             sentence,
             voice=active_voice(self.config),
             speed=self.config.voice.speed,

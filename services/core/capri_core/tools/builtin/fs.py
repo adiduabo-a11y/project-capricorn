@@ -215,6 +215,37 @@ def _read_slice_sync(
     return size, digest, collected, total_lines, encoding, collected_bytes
 
 
+def _extract_pdf_sync(path: Path) -> str:
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(str(path))
+        pages = []
+        for i, page in enumerate(reader.pages, 1):
+            t = (page.extract_text() or "").strip()
+            if t:
+                pages.append(f"--- Page {i} ---\n{t}")
+        return "\n\n".join(pages)
+    except Exception as exc:
+        raise OSError(f"could not read PDF: {exc}") from exc
+
+
+def _extract_docx_sync(path: Path) -> str:
+    try:
+        import zipfile
+        import xml.etree.ElementTree as ET
+        with zipfile.ZipFile(str(path)) as z:
+            tree = ET.fromstring(z.read("word/document.xml"))
+            ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+            lines = []
+            for p in tree.findall(".//w:p", ns):
+                text = "".join(p.itertext()).strip()
+                if text:
+                    lines.append(text)
+            return "\n".join(lines)
+    except Exception as exc:
+        raise OSError(f"could not read DOCX: {exc}") from exc
+
+
 async def fs_read(
     ctx: ToolContext,
     *,
@@ -240,6 +271,48 @@ async def fs_read(
     if last <= 0:
         last = first + MAX_READ_LINES - 1
     last = max(first, min(last, first + MAX_RANGE_LINES - 1))
+
+    suffix = file.suffix.lower()
+    if suffix in (".pdf", ".docx"):
+        try:
+            if suffix == ".pdf":
+                raw_text = await asyncio.to_thread(_extract_pdf_sync, file)
+                doc_type = "PDF"
+            else:
+                raw_text = await asyncio.to_thread(_extract_docx_sync, file)
+                doc_type = "DOCX"
+        except OSError as exc:
+            return ToolResult.error(f"fs.read: {exc}")
+
+        all_lines = raw_text.splitlines()
+        total_lines = len(all_lines)
+        if total_lines > 0 and first > total_lines:
+            return ToolResult.error(f"fs.read: start_line {first} is past the end of {total_lines}-line document")
+        slice_lines = all_lines[first - 1 : last]
+        numbered = [f"{first + i:6d}  {line}" for i, line in enumerate(slice_lines)]
+        body = "\n".join(numbered) or "(empty document)"
+        header = f"[{doc_type} document: {file.name} ({total_lines} lines extracted)]\n"
+        if last < total_lines:
+            body = f"{header}{body}\n[lines {first}-{min(last, total_lines)} of {total_lines}; continue with start_line={last + 1}]"
+        else:
+            body = f"{header}{body}"
+
+        digest = hashlib.sha256(raw_text.encode("utf-8", errors="replace")).hexdigest()
+        if ctx.reads is not None:
+            ctx.reads[target] = digest
+
+        return ToolResult(
+            ok=True,
+            output=body,
+            data={
+                "path": target,
+                "first": first,
+                "last": min(last, total_lines),
+                "total": total_lines,
+                "documentType": doc_type,
+            },
+            ms=elapsed_ms(started),
+        )
 
     try:
         size, digest, body_lines, total_lines, encoding, read_bytes = await asyncio.to_thread(

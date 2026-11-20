@@ -826,6 +826,31 @@ summary,
   border-left-color: var(--hot);
 }
 
+.fault-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.fault-dismiss {
+  background: transparent;
+  border: none;
+  color: var(--rose);
+  opacity: 0.6;
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.fault-dismiss:hover {
+  opacity: 1;
+  transform: scale(1.15);
+}
+
 .msg.fault .msg-role,
 .msg.fault p {
   color: var(--rose);
@@ -1288,6 +1313,18 @@ summary,
 .composer button:not(.mic):hover:not(:disabled) {
   border-color: var(--cyan);
   background: linear-gradient(180deg, rgba(48, 32, 39, 0.98), rgba(20, 16, 24, 0.98));
+}
+
+.composer button.stop-btn {
+  border-color: var(--hot);
+  background: linear-gradient(180deg, rgba(80, 20, 35, 0.95), rgba(40, 10, 20, 0.98));
+  color: var(--hot);
+}
+
+.composer button.stop-btn:hover:not(:disabled) {
+  border-color: #ff5577;
+  background: linear-gradient(180deg, rgba(120, 30, 50, 0.98), rgba(60, 15, 30, 0.98));
+  color: #ffffff;
 }
 
 .composer button:disabled {

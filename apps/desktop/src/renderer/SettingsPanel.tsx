@@ -32,9 +32,14 @@ interface ModelsStatus {
   online: boolean
   model: string
   structured: string
+  decisionEndpoint?: string
+  decisionModel?: string
+  decisionStatus?: { configured: boolean; online: boolean; ms?: number }
+  embedEndpoint?: string
   embed?: string
   embedDim?: number
   embedMode?: string
+  embedStatus?: { configured: boolean; online: boolean; ms?: number }
 }
 
 interface Props {
@@ -455,7 +460,14 @@ function BrainPanel({
 
         <div className="set-field-wide">
           <label className="set-field">
-            <span className="set-label">Decision Server URL (Optional)</span>
+            <span className="set-label">
+              Decision Server URL (Optional)
+              {status?.decisionStatus?.configured ? (
+                <span className={`set-status ${status.decisionStatus.online ? 'is-on' : 'is-off'}`} style={{ marginLeft: 8 }}>
+                  {status.decisionStatus.online ? `online${status.decisionStatus.ms ? ` · ${status.decisionStatus.ms}ms` : ''}` : 'offline'}
+                </span>
+              ) : null}
+            </span>
             <span className="set-help">
               Dedicated endpoint for decision &amp; fast routing. Leave blank to use main server.
             </span>
@@ -495,7 +507,14 @@ function BrainPanel({
 
         <div className="set-field-wide">
           <label className="set-field">
-            <span className="set-label">Embedding Server URL (Optional)</span>
+            <span className="set-label">
+              Embedding Server URL (Optional)
+              {status?.embedStatus?.configured ? (
+                <span className={`set-status ${status.embedStatus.online ? 'is-on' : 'is-off'}`} style={{ marginLeft: 8 }}>
+                  {status.embedStatus.online ? `online${status.embedStatus.ms ? ` · ${status.embedStatus.ms}ms` : ''}` : 'offline'}
+                </span>
+              ) : null}
+            </span>
             <span className="set-help">
               Dedicated endpoint for embeddings. Leave blank to use main server.
             </span>

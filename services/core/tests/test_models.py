@@ -502,6 +502,11 @@ async def test_separate_endpoints() -> None:
         await router.decide([Msg("user", "what to do")], [])
         check(calls[-1][0] == "http://decision.test/v1/chat/completions", "decide() routes to decision endpoint")
         check(calls[-1][1].get("model") == "small-fast", "decide() uses decision model")
+
+        # Strip /systemone if user typed the full path into decision_endpoint
+        config.models.decision_endpoint = "http://decision.test/v1/systemone"
+        router.reconfigure(config.models)
+        check(router._base_for("decision") == "http://decision.test/v1", "strips /systemone from decision endpoint")
     finally:
         await router.aclose()
 

@@ -157,3 +157,8 @@ class VoiceRoutesMixin:
     async def _voice_status(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
         self._require_session(client)
         return self.voice.status()
+
+    async def _voice_download(self, client: Client, params: dict[str, Any]) -> dict[str, Any]:
+        self._require_session(client)
+        engine_name = str(params.get("engine") or "").strip() or None
+        return await self.voice.download_models(engine_name)

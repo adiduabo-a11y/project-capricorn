@@ -89,10 +89,11 @@ class Registry:
 
 def builtin_registry() -> Registry:
     """The built-ins, wired by name."""
-    from .builtin import avatar, detail, fs, notes, patch, process, project, screen, shell
+    from .builtin import avatar, detail, fs, notes, patch, process, project, screen, shell, web
 
     registry = Registry()
     registry.register(avatar.PLACE_SPEC, avatar.avatar_place)
+    registry.register(web.FETCH_SPEC, web.web_fetch)
     registry.register(process.LIST_SPEC, process.process_list)
     registry.register(process.CLOSE_SPEC, process.process_close)
     registry.register(project.INSPECT_SPEC, project.project_inspect)

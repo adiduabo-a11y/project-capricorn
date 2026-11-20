@@ -75,8 +75,27 @@ class EndpointEmbedder:
     def _base(self) -> str:
         custom = self.cfg.embed.endpoint.strip()
         if custom:
-            return custom.rstrip("/")
-        return self.cfg.endpoint.strip().rstrip("/")
+            raw = custom.rstrip("/")
+            if raw.endswith("/embeddings"):
+                raw = raw[:-len("/embeddings")].rstrip("/")
+            return raw
+        base = self.cfg.endpoint.strip().rstrip("/")
+        if base.endswith("/embeddings"):
+            base = base[:-len("/embeddings")].rstrip("/")
+        return base
+
+    async def available(self) -> dict[str, Any]:
+        """Probe the embed endpoint if configured."""
+        custom = self.cfg.embed.endpoint.strip().rstrip("/")
+        if not custom:
+            return {"configured": False, "online": False}
+        t0 = time.monotonic()
+        try:
+            resp = await self._http().get(f"{custom}/models", timeout=3.0)
+            ms = round((time.monotonic() - t0) * 1000)
+            return {"configured": True, "online": resp.status_code < 400, "ms": ms}
+        except Exception:
+            return {"configured": True, "online": False}
 
     async def _post_embed(self, base: str, payload: dict[str, Any]) -> httpx.Response:
         for attempt in range(2):

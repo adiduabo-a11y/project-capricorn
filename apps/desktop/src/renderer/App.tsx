@@ -261,6 +261,7 @@ export default function App() {
   const [mood, setMood] = useState<string>('idle')
   const [draft, setDraft] = useState('')
   const [streaming, setStreaming] = useState<string | null>(null)
+  const busy = streaming !== null || mood === 'thinking' || mood === 'working'
   const [error, setError] = useState<string | null>(null)
   const [confirming, setConfirming] = useState<ConfirmRequest | null>(null)
   // The bubble has room for one control, not one per server: this picks the
@@ -446,6 +447,12 @@ export default function App() {
     setVoiceNote('')
   }, [clearWakeFollowUp])
 
+  const dismissError = useCallback(() => {
+    setError(null)
+    setMood((current) => (current === 'error' ? 'idle' : current))
+    setVoiceNote('')
+  }, [])
+
   /**
    * Her line to a bare "Capri" is over, so the listening window starts now.
    * Opening it at the queue instead spent the first second of the window on
@@ -502,15 +509,46 @@ export default function App() {
     openFloor()
   }, [floorAfterTurn, openFloor, streaming])
 
-  // Escape drops the floor the same way the chip does.
+  const stopTurn = useCallback(async () => {
+    const turnId = activeTurn.current || streaming
+    playerRef.current?.stop()
+    capri.setMouth(null)
+    bargeRef.current?.stop()
+    bargeRef.current = null
+    setSpeaking(false)
+    void capri.call('voice.stop', { reason: 'cancel' }).catch(() => undefined)
+    try {
+      if (turnId) {
+        await capri.call('turn.cancel', { turnId })
+      } else {
+        await capri.call('turn.cancel', {})
+      }
+    } catch {
+      // The turn finished while she was working; nothing left to stop.
+    }
+    activeTurn.current = null
+    setStreaming(null)
+    setMood('idle')
+  }, [streaming])
+
+  // Escape drops the floor, dismisses active faults, or interrupts Capri when working.
   useEffect(() => {
-    if (!floorOpen) return
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closeFloor()
+      if (event.key === 'Escape') {
+        if (busy) {
+          void stopTurn()
+          return
+        }
+        if (error) {
+          dismissError()
+          return
+        }
+        if (floorOpen) closeFloor()
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [closeFloor, floorOpen])
+  }, [busy, closeFloor, dismissError, error, floorOpen, stopTurn])
 
   /**
    * A wake sentence that is about the conversation, not a new request. Returns
@@ -541,19 +579,11 @@ export default function App() {
       }
       // With no card open, yes/no mean nothing on their own.
       if (intent === 'affirm' || intent === 'deny') return false
-      const turnId = activeTurn.current
-      if (!turnId) return false
-      playerRef.current?.stop()
-      capri.setMouth(null)
-      void capri.call('voice.stop', { reason: 'cancel' }).catch(() => undefined)
-      try {
-        await capri.call('turn.cancel', { turnId })
-      } catch {
-        // The turn finished while she was listening; nothing left to stop.
-      }
+      if (!activeTurn.current && !streaming) return false
+      await stopTurn()
       return true
     },
-    [],
+    [stopTurn, streaming],
   )
 
   /** Voice status is the one truth for the wake setting: the tray writes the
@@ -755,6 +785,11 @@ export default function App() {
       }
       case 'agent.state': {
         setMood(moodFor(event.state))
+        if (event.state === 'idle') {
+          activeTurn.current = null
+          setStreaming(null)
+          setConfirming(null)
+        }
         break
       }
       case 'agent.step': {
@@ -1601,13 +1636,18 @@ export default function App() {
   }, [])
 
   const sendText = useCallback(
-    async (raw: string): Promise<boolean> => {
+    async (raw: string, interrupt = false): Promise<boolean> => {
       const text = raw.trim()
-      if (!text || streaming || status !== 'online' || confirming) return false
+      if (!text || status !== 'online' || confirming) return false
+      if (streaming) {
+        if (!interrupt) return false
+        await stopTurn()
+      }
       bargedRef.current = false
 
       setDraft('')
       setError(null)
+      setMood((current) => (current === 'error' ? 'idle' : current))
       const turnStamp = Date.now()
       setEntries((prev) =>
         capLiveEntries([
@@ -1636,23 +1676,47 @@ export default function App() {
         return false
       }
     },
-    [confirming, status, streaming],
+    [confirming, status, stopTurn, streaming],
   )
 
   submitRef.current = sendText
 
   const send = useCallback(() => {
+    if (busy) {
+      const trimmed = draft.trim().toLowerCase()
+      if (['stop', 'cancel', 'halt', 'quit', 'pause', 'stop please'].includes(trimmed) || !trimmed) {
+        setDraft('')
+        void stopTurn()
+        return
+      }
+      void sendText(draft, true)
+      return
+    }
     void sendText(draft)
-  }, [draft, sendText])
+  }, [busy, draft, sendText, stopTurn])
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault()
+        const trimmed = draft.trim().toLowerCase()
+        if (busy) {
+          if (['stop', 'cancel', 'halt', 'quit', 'pause', 'stop please'].includes(trimmed)) {
+            setDraft('')
+            void stopTurn()
+            return
+          }
+          if (trimmed) {
+            void sendText(draft, true)
+            return
+          }
+          void stopTurn()
+          return
+        }
         void send()
       }
     },
-    [send],
+    [busy, draft, send, sendText, stopTurn],
   )
 
   const answerConfirm = useCallback(
@@ -1727,11 +1791,20 @@ export default function App() {
         }
       : null
 
-  const busy = streaming !== null || mood === 'thinking' || mood === 'working'
-  const canSend = status === 'online' && draft.trim().length > 0 && !streaming && !confirming
+  const canSend = status === 'online' && !confirming && (busy || draft.trim().length > 0)
   const bubbleMessages = entries.filter(
     (entry): entry is MessageEntry => entry.kind === 'message',
   )
+
+  const latestStep = useMemo(() => {
+    if (!busy) return null
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i]
+      if (e.kind === 'step' && e.tool && e.tool !== 'done') return e.tool
+      if (e.kind === 'tool' && e.name) return e.name
+    }
+    return null
+  }, [busy, entries])
 
   const moodLabel = useMemo(() => {
     if (status !== 'online') return STATUS_LABEL[status]
@@ -1848,9 +1921,27 @@ export default function App() {
               </article>
             ))}
 
+            {latestStep ? (
+              <div className="qb-step-pill" title={`Running: ${latestStep}`}>
+                <span className="qb-step-spin" aria-hidden />
+                <span className="qb-step-label">{latestStep}</span>
+              </div>
+            ) : null}
+
             {error ? (
               <article className="qb-msg fault">
-                <span className="qb-msg-role">fault</span>
+                <div className="qb-fault-head">
+                  <span className="qb-msg-role">fault</span>
+                  <button
+                    type="button"
+                    className="qb-fault-dismiss"
+                    title="Dismiss error (Esc)"
+                    aria-label="Dismiss error"
+                    onClick={dismissError}
+                  >
+                    ×
+                  </button>
+                </div>
                 <p>{error}</p>
               </article>
             ) : null}
@@ -1992,13 +2083,19 @@ export default function App() {
               spellCheck={false}
             />
             <button
-              className="qb-send"
-              onClick={() => void send()}
+              className={`qb-send ${busy ? 'qb-stop' : ''}`}
+              onClick={() => {
+                if (busy && !draft.trim()) {
+                  void stopTurn()
+                } else {
+                  void send()
+                }
+              }}
               disabled={!canSend}
-              title="Send"
-              aria-label="Send"
+              title={busy ? (draft.trim() ? 'Interrupt & Send (Enter)' : 'Stop Capri (Esc)') : 'Send (Enter)'}
+              aria-label={busy ? 'Stop Capri' : 'Send'}
             >
-              {busy ? '···' : '↑'}
+              {busy ? (draft.trim() ? '↑' : '■') : '↑'}
             </button>
           </div>
         </div>
@@ -2339,7 +2436,18 @@ export default function App() {
 
           {error ? (
             <article className="msg fault">
-              <span className="msg-role">fault</span>
+              <div className="fault-head">
+                <span className="msg-role">fault</span>
+                <button
+                  type="button"
+                  className="fault-dismiss"
+                  title="Dismiss error (Esc)"
+                  aria-label="Dismiss error"
+                  onClick={dismissError}
+                >
+                  ×
+                </button>
+              </div>
               <p>{error}</p>
             </article>
           ) : null}
@@ -2442,8 +2550,20 @@ export default function App() {
             disabled={status !== 'online' || !!confirming}
             spellCheck={false}
           />
-          <button onClick={() => void send()} disabled={!canSend}>
-            {busy ? '···' : 'send'}
+          <button
+            className={busy ? 'stop-btn' : ''}
+            onClick={() => {
+              if (busy && !draft.trim()) {
+                void stopTurn()
+              } else {
+                void send()
+              }
+            }}
+            disabled={!canSend}
+            title={busy ? (draft.trim() ? 'Interrupt & Send (Enter)' : 'Stop Capri (Esc)') : 'Send (Enter)'}
+            aria-label={busy ? 'Stop Capri' : 'Send'}
+          >
+            {busy ? (draft.trim() ? 'send' : 'stop') : 'send'}
           </button>
         </div>
 

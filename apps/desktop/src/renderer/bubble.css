@@ -277,6 +277,31 @@
   border-left-color: var(--hot);
 }
 
+.qb-fault-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.qb-fault-dismiss {
+  background: transparent;
+  border: none;
+  color: var(--rose);
+  opacity: 0.6;
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.qb-fault-dismiss:hover {
+  opacity: 1;
+  transform: scale(1.15);
+}
+
 .qb-msg.fault .qb-msg-role,
 .qb-msg.fault p {
   color: var(--rose);
@@ -494,6 +519,18 @@
   background: linear-gradient(180deg, rgba(48, 32, 39, 0.98), rgba(20, 16, 24, 0.98));
 }
 
+.qb-send.qb-stop {
+  border-color: var(--hot);
+  background: linear-gradient(180deg, rgba(80, 20, 35, 0.95), rgba(40, 10, 20, 0.98));
+  color: var(--hot);
+}
+
+.qb-send.qb-stop:hover:not(:disabled) {
+  border-color: #ff5577;
+  background: linear-gradient(180deg, rgba(120, 30, 50, 0.98), rgba(60, 15, 30, 0.98));
+  color: #ffffff;
+}
+
 .qb-send:disabled {
   opacity: 0.28;
   cursor: default;
@@ -531,4 +568,34 @@
 
 .bubble-shell[data-mood='talking'] .qb-dot {
   animation: pulse 0.75s ease-in-out infinite;
+}
+
+.qb-step-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 6px auto;
+  padding: 3px 8px;
+  background: rgba(94, 240, 246, 0.08);
+  border: 1px solid rgba(94, 240, 246, 0.28);
+  border-radius: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--cyan);
+  box-shadow: 0 0 10px rgba(94, 240, 246, 0.12);
+  align-self: flex-start;
+  animation: fadeIn 0.2s ease-in;
+}
+
+.qb-step-spin {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 6px var(--cyan);
+  animation: pulse 0.85s ease-in-out infinite;
+}
+
+.qb-step-label {
+  letter-spacing: 0.02em;
 }
