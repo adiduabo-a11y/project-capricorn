@@ -169,10 +169,22 @@ class FasterWhisperEngine:
                 raise SttUnavailable(self._error) from exc
             self.directory.mkdir(parents=True, exist_ok=True)
             log.info("loading faster-whisper %s (%s)", self.model_name, self.compute_type)
+            dev = (self.config.voice.device or "auto").lower()
+            target_device = "cpu"
+            if dev == "cuda":
+                target_device = "cuda"
+            elif dev == "auto":
+                try:
+                    import torch
+
+                    if torch.cuda.is_available():
+                        target_device = "cuda"
+                except Exception:
+                    pass
             try:
                 self._model = WhisperModel(
                     self.model_name,
-                    device="cpu",
+                    device=target_device,
                     compute_type=self.compute_type,
                     download_root=str(self.directory),
                 )

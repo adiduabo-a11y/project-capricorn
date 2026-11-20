@@ -272,6 +272,12 @@ class MemoryWriter:
         )
         return written
 
+    async def extract(
+        self, user_text: str, observations: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Extract durable memory items from user text and observations."""
+        return await self._extract(user_text, observations or [])
+
     # ------------------------------------------------------------------ extract
 
     async def _extract(
@@ -290,10 +296,34 @@ class MemoryWriter:
         )
         messages: list[Msg] = [Msg("system", _SYSTEM), Msg("user", prompt)]
 
+        extract_kwargs: dict[str, Any] = {}
+        if hasattr(self.config, "models"):
+            decision_endpoint = getattr(self.config.models, "decision_endpoint", "").strip()
+            decision_model = getattr(self.config.models, "decision_model", "").strip()
+            if decision_endpoint:
+                extract_kwargs["endpoint"] = decision_endpoint
+            if decision_model:
+                extract_kwargs["model"] = decision_model
+
         try:
-            extracted = await self.brain.extract(
-                messages, ITEM_SCHEMA, name="memory_items", max_tokens=900
-            )
+            try:
+                extracted = await self.brain.extract(
+                    messages,
+                    ITEM_SCHEMA,
+                    name="memory_items",
+                    max_tokens=900,
+                    **extract_kwargs,
+                )
+            except TypeError as te:
+                if extract_kwargs and ("unexpected keyword argument" in str(te) or "got an unexpected keyword" in str(te)):
+                    extracted = await self.brain.extract(
+                        messages,
+                        ITEM_SCHEMA,
+                        name="memory_items",
+                        max_tokens=900,
+                    )
+                else:
+                    raise
         except ModelUnavailable as exc:
             log.info("memory writer skipped: %s", exc)
             return []

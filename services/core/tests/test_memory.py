@@ -23,6 +23,7 @@ from capri_core.config import CapriConfig
 from capri_core.memory import HashEmbedder, MemoryService
 from capri_core.memory import decay, repo, retrieval
 from capri_core.memory.embed import EmbedUnavailable
+from capri_core.memory.writer import MemoryWriter
 from capri_core.server.session import Session
 from capri_core.store import db, vector
 from capri_core.tools import Policy, builtin_registry
@@ -53,6 +54,7 @@ class ScriptedExtractor:
         self.batches = list(batches or [])
         self.calls = 0
         self.prompts: list[Any] = []
+        self.kwargs_list: list[dict[str, Any]] = []
 
     async def available(self) -> bool:
         return True
@@ -66,6 +68,7 @@ class ScriptedExtractor:
     async def extract(self, msgs, schema, **kwargs) -> dict[str, Any]:
         self.calls += 1
         self.prompts.append(msgs)
+        self.kwargs_list.append(kwargs)
         items = self.batches.pop(0) if self.batches else []
         return {"items": items}
 
@@ -474,6 +477,21 @@ class _NullEmit:
         return None
 
 
+async def test_writer_decision_model(conn: Any) -> None:
+    config = CapriConfig()
+    config.models.decision_endpoint = "http://decision.srv/v1"
+    config.models.decision_model = "decision-model-small"
+
+    brain = ScriptedExtractor(
+        [[{"kind": "fact", "text": "Daeme likes coffee.", "quote": "prefer coffee", "importance": 0.5, "confidence": 0.8, "entities": []}]]
+    )
+    writer = MemoryWriter(conn, brain, None, config, "default")
+    await writer.observe(turn_id="t1", user_text="I prefer coffee in the morning.")
+    check(brain.calls == 1, "writer called brain.extract")
+    check(brain.kwargs_list[0].get("endpoint") == "http://decision.srv/v1", "writer passed decision_endpoint")
+    check(brain.kwargs_list[0].get("model") == "decision-model-small", "writer passed decision_model")
+
+
 async def main() -> int:
     raw = Path(tempfile.mkdtemp(prefix="capri-memory-"))
     try:
@@ -491,6 +509,8 @@ async def main() -> int:
 
         print("writer")
         await test_writer(conn, config)
+        print("writer decision model")
+        await test_writer_decision_model(conn)
         print("dedupe")
         await test_dedupe(conn, config)
         print("contradiction")

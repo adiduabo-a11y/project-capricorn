@@ -167,6 +167,9 @@ def test_unset(config: CapriConfig, conn: Any) -> None:
     check(status["exists"] is False, "no vault is not an error state")
     check(status["notes"] == 0, "an unset vault has no notes")
     check(status["error"] == "", f"an unset vault says nothing: {status['error']!r}")
+    check(service.is_configured() is False, "unset vault is not configured")
+    check(service.record_daily_log("something") is None, "record_daily_log returns None when unset")
+    check(service.record_research("topic", "content") is None, "record_research returns None when unset")
     try:
         service.read("Inbox/idea.md")
     except VaultError as exc:
@@ -424,6 +427,93 @@ async def test_tools(config: CapriConfig, conn: Any, vault: Path) -> None:
     check(not refused.ok and "Settings" in refused.output, f"no vault is explained: {refused.output}")
 
 
+async def test_auto_notes(config: CapriConfig, conn: Any, vault: Path) -> None:
+    print("auto notes")
+    service = make_service(config, conn)
+    check(service.is_configured() is True, "configured vault is detected")
+
+    # 1. Daily log recording
+    d_res1 = service.record_daily_log(
+        "Finished refactoring the auth service.",
+        timestamp="09:15",
+        date_str="2026-11-20",
+        title="Auth refactor",
+    )
+    check(d_res1 is not None, "daily log created")
+    daily_file = vault / "Daily" / "2026-11-20.md"
+    check(daily_file.exists(), "Daily/2026-11-20.md was created")
+    content1 = daily_file.read_text(encoding="utf-8")
+    check("# 2026-11-20" in content1, "daily note has date heading")
+    check("## 09:15 - Auth refactor" in content1, "daily note has timestamp & title")
+    check("Finished refactoring the auth service." in content1, "daily note has summary")
+
+    # Append second task to daily log
+    d_res2 = service.record_daily_log(
+        "Deployed release v1.2 to staging.",
+        timestamp="11:30",
+        date_str="2026-11-20",
+    )
+    check(d_res2 is not None, "second daily log appended")
+    content2 = daily_file.read_text(encoding="utf-8")
+    check("## 11:30" in content2, "second entry appended with timestamp")
+    check("Deployed release v1.2 to staging." in content2, "second summary present")
+    check("Finished refactoring the auth service." in content2, "first summary preserved")
+
+    # 2. Research note recording
+    r_res1 = service.record_research(
+        "Vector Databases",
+        "HNSW indexes allow approximate nearest neighbors with high recall and low latency.",
+        timestamp="14:00",
+        date_str="2026-11-20",
+    )
+    check(r_res1 is not None, "research note created")
+    research_file = vault / "Research" / "Vector Databases.md"
+    check(research_file.exists(), "Research/Vector Databases.md was created")
+    r_content1 = research_file.read_text(encoding="utf-8")
+    check("# Vector Databases" in r_content1, "research note has topic title")
+    check("HNSW indexes allow" in r_content1, "research note has content")
+
+    # Append findings to existing research note
+    r_res2 = service.record_research(
+        "Vector Databases",
+        "Quantization (PQ/SQ) reduces memory footprint by 4-8x with minor accuracy trade-offs.",
+        timestamp="16:00",
+        date_str="2026-11-20",
+    )
+    check(r_res2 is not None, "research note appended")
+    r_content2 = research_file.read_text(encoding="utf-8")
+    check("HNSW indexes allow" in r_content2, "first findings preserved")
+    check("Quantization (PQ/SQ)" in r_content2, "second findings appended")
+
+    # 3. auto_record_turn: research turn
+    turn_res_research = await service.auto_record_turn(
+        request="Research the differences between SQLite WAL and rollback journal",
+        reply="SQLite Write-Ahead Logging (WAL) mode provides higher concurrency than rollback journals by allowing concurrent readers while writing occurs.",
+        observations=["sqlite pragma search"],
+    )
+    check(len(turn_res_research) >= 1, f"research turn auto-recorded: {len(turn_res_research)}")
+    r_notes = [p for p in (vault / "Research").glob("*.md") if "sqlite" in p.name.lower()]
+    check(len(r_notes) >= 1, f"research note was generated: {[p.name for p in r_notes]}")
+
+    # 4. auto_record_turn: task turn
+    turn_res_task = await service.auto_record_turn(
+        request="Fix memory leak in background worker task",
+        reply="Fixed memory leak in worker.py by releasing session handles properly.",
+        observations=["patched worker.py"],
+        task_summary="Resolved worker memory leak by closing idle database connections.",
+    )
+    check(len(turn_res_task) >= 1, f"task turn auto-recorded: {len(turn_res_task)}")
+
+    # 5. auto_notes disabled
+    disabled_config = set_value(config, "notes.auto_notes", False)
+    disabled_service = make_service(disabled_config, conn)
+    turn_disabled = await disabled_service.auto_record_turn(
+        request="Research quantum computers",
+        reply="Quantum computers use qubits instead of classical bits to perform computations.",
+    )
+    check(len(turn_disabled) == 0, "nothing recorded when auto_notes is disabled")
+
+
 async def main() -> int:
     raw = Path(tempfile.mkdtemp(prefix="capri-notes-"))
     try:
@@ -445,6 +535,7 @@ async def main() -> int:
         await test_prune(config, conn, vault)
         test_write(config, conn, vault)
         await test_tools(config, conn, vault)
+        await test_auto_notes(config, conn, vault)
     finally:
         for open_conn in _CONNS:
             try:

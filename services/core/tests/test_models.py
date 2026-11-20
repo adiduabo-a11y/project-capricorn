@@ -461,14 +461,20 @@ async def test_separate_endpoints() -> None:
     calls: list[tuple[str, dict]] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        calls.append((str(request.url), json.loads(request.content)))
+        url = str(request.url)
+        body = json.loads(request.content)
+        calls.append((url, body))
+        if "response_format" in body or "grammar" in body:
+            content = '{"thought":"done","tool":"done","final":"yes","items":[]}'
+        else:
+            content = '{"thought":"done","tool":"done","final":"yes"}'
         return httpx.Response(
             200,
             json={
                 "choices": [
                     {
                         "message": {
-                            "content": '{"thought":"done","tool":"done","final":"yes"}'
+                            "content": content
                         }
                     }
                 ],
@@ -502,6 +508,10 @@ async def test_separate_endpoints() -> None:
         await router.decide([Msg("user", "what to do")], [])
         check(calls[-1][0] == "http://decision.test/v1/chat/completions", "decide() routes to decision endpoint")
         check(calls[-1][1].get("model") == "small-fast", "decide() uses decision model")
+
+        await router.extract([Msg("user", "extract")], {"type": "object"})
+        check(calls[-1][0] == "http://decision.test/v1/chat/completions", "extract() routes to decision endpoint")
+        check(calls[-1][1].get("model") == "small-fast", "extract() uses decision model")
 
         # Strip /systemone if user typed the full path into decision_endpoint
         config.models.decision_endpoint = "http://decision.test/v1/systemone"

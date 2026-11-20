@@ -89,7 +89,7 @@ class ModelsCfg(_Base):
         default="",
         title="Decision server URL",
         description=(
-            "Optional separate endpoint for decision/fast routing calls. "
+            "Optional separate endpoint for decision/fast routing and extraction calls. "
             "Leave blank to use the main server URL."
         ),
     )
@@ -97,7 +97,7 @@ class ModelsCfg(_Base):
         default="",
         title="Decision model ID",
         description=(
-            "Optional model ID for decision/routing (e.g. a small fast model). "
+            "Optional model ID for decision/routing and extraction (e.g. a small fast model). "
             "Leave blank to use the main model."
         ),
     )
@@ -229,6 +229,11 @@ class NotesCfg(_Base):
     # Her wiki, not just a folder: with this on and a vault set, every turn
     # starts with the notes that match the request.
     recall: bool = True
+    auto_notes: bool = Field(
+        default=True,
+        title="Auto Update Notes",
+        description="Automatically capture useful research findings and day-to-day task summaries to the Obsidian vault.",
+    )
 
 
 class BlendCfg(_Base):
@@ -348,6 +353,15 @@ class VoiceCfg(_Base):
     # "tone" is the offline placeholder: same pipeline, no weights. It never
     # substitutes itself for a missing Kokoro install.
     tts: Literal["kokoro", "piper", "chatterbox", "pocket", "tone"] = "kokoro"
+    device: Literal["auto", "directml", "cuda", "cpu"] = Field(
+        default="auto",
+        title="Voice compute device",
+        description=(
+            "Hardware compute device for speech synthesis and recognition: "
+            "auto (GPU if available, else CPU), directml (AMD/Intel/NVIDIA GPU on Windows), "
+            "cuda (NVIDIA GPU), or cpu."
+        ),
+    )
     # Empty means <capri home>/models/kokoro.
     model_dir: str = ""
     # Chatterbox clone target. Empty means <capri home>/models/chatterbox/capri-reference.wav.
@@ -491,7 +505,15 @@ class PolicyCfg(_Base):
     allow_paths: list[str] = Field(default_factory=_default_allow_paths)
     deny_paths: list[str] = Field(default_factory=_default_deny_paths)
     screen_allow_apps: list[str] = Field(
-        default_factory=lambda: ["chrome.exe", "code.exe", "explorer.exe", "notepad.exe"]
+        default_factory=list
+    )
+    screen_block_apps: list[str] = Field(
+        default_factory=list,
+        title="Blocked Screen Apps",
+        description=(
+            "Processes Capri is strictly forbidden to launch, focus, or drive. "
+            "If empty, all apps are allowed except those explicitly blocked."
+        ),
     )
     workspace_edits: Literal["allow", "confirm"] = Field(
         default="allow",

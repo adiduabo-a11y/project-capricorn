@@ -325,6 +325,22 @@ class TurnRunner:
             except Exception:
                 log.exception("memory write failed; the turn is unaffected")
 
+        if self.notes is not None and not self.planner_failed:
+            try:
+                auto_notes_enabled = bool(getattr(self.config.notes, "auto_notes", True))
+                if auto_notes_enabled and hasattr(self.notes, "auto_record_turn"):
+                    recorded = await self.notes.auto_record_turn(
+                        request=text,
+                        reply=final,
+                        observations=observations,
+                        task_summary=task_payload.get("summary") if task_payload else None,
+                        task_title=task_payload.get("title") if task_payload else None,
+                    )
+                    for item in recorded:
+                        await self.emit(_event("notes.recorded", **item))
+            except Exception:
+                log.exception("auto-notes recording failed; the turn is unaffected")
+
         await self.emit(_state("idle"))
 
     # ------------------------------------------------------------------ inner

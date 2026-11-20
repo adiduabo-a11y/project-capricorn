@@ -583,11 +583,27 @@ class Policy:
             or "/" in raw
             or "\\" in raw
         ):
-            return Decision(BLOCK, 3, "launch takes an allowlisted executable name, not a path")
-        patterns = [pattern.lower() for pattern in self.cfg.screen_allow_apps]
-        if not any(fnmatch.fnmatch(name, pattern) for pattern in patterns):
-            return Decision(BLOCK, 3, f"{name} is not in policy.screen_allow_apps")
-        return Decision(ALLOW, 1, f"launch of allowlisted {name}")
+            return Decision(BLOCK, 3, "launch takes an executable name, not a path")
+        stem = name[:-4] if name.endswith(".exe") else name
+        exe = f"{stem}.exe"
+        candidates = (name, stem, exe)
+
+        block_patterns = [p.lower() for p in getattr(self.cfg, "screen_block_apps", ())]
+        if any(
+            any(fnmatch.fnmatch(c, pattern) for pattern in block_patterns)
+            for c in candidates
+        ):
+            return Decision(BLOCK, 3, f"{name} is in policy.screen_block_apps")
+
+        allow_patterns = [p.lower() for p in getattr(self.cfg, "screen_allow_apps", ())]
+        if allow_patterns:
+            if not any(
+                any(fnmatch.fnmatch(c, pattern) for pattern in allow_patterns)
+                for c in candidates
+            ):
+                return Decision(BLOCK, 3, f"{name} is not in policy.screen_allow_apps")
+
+        return Decision(ALLOW, 1, f"launch of {name}")
 
     def is_detected_command(self, command: str, cwd: str = "") -> bool:
         """True for an exact command the detector read out of the project."""

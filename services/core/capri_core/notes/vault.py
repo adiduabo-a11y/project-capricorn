@@ -16,8 +16,10 @@ workspace layouts and plugin state do not end up in her memory.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import os
+import re
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -86,6 +88,15 @@ class VaultService:
     @property
     def raw(self) -> str:
         return str(getattr(self.config.notes, "vault", "") or "").strip()
+
+    def is_configured(self) -> bool:
+        """True if the vault is configured and points to an existing directory."""
+        if not self.raw:
+            return False
+        try:
+            return self.root().is_dir()
+        except (VaultError, OSError):
+            return False
 
     def root(self) -> Path:
         """The vault folder, canonical, or a refusal that says what to do."""
@@ -455,3 +466,287 @@ class VaultService:
             "bytes": path.stat().st_size,
             "lines": written.count("\n") + (0 if written.endswith("\n") or not written else 1),
         }
+
+    # ------------------------------------------------------------------ auto-notes
+
+    def _schedule_index(self, path: Path) -> None:
+        """Schedule index_note in the running event loop if one is active."""
+        if self.rag is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                loop.create_task(self.index_note(path))
+        except (RuntimeError, ValueError):
+            pass
+
+    @staticmethod
+    def _clean_topic(topic: str) -> str:
+        text = str(topic or "").strip()
+        text = re.sub(r'[`*_{}\[\]()#+!]', " ", text)
+        text = re.sub(r'[\\/*?:"<>|.]', "", text)
+        text = " ".join(text.split())
+        if not text:
+            return "General"
+        words = text.split(" ")
+        clean_words = [w.capitalize() if not w.isupper() else w for w in words[:8]]
+        cleaned = " ".join(clean_words)[:60].strip()
+        return cleaned or "General"
+
+    def record_daily_log(
+        self,
+        summary: str,
+        *,
+        timestamp: str | None = None,
+        date_str: str | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Append a task summary or log entry to Daily/YYYY-MM-DD.md.
+
+        Safe to call when notes are not configured; returns None without raising.
+        """
+        if not self.is_configured():
+            return None
+        text = str(summary or "").strip()
+        if not text:
+            return None
+        now = datetime.datetime.now()
+        ds = date_str or now.strftime("%Y-%m-%d")
+        ts = timestamp or now.strftime("%H:%M")
+        note_name = f"Daily/{ds}.md"
+        try:
+            target = self.note_path(note_name)
+        except (VaultError, OSError):
+            return None
+
+        exists = target.exists()
+        header = f"## {ts} - {title}" if title else f"## {ts}"
+        if not exists:
+            entry = f"# {ds}\n\n{header}\n{text}\n"
+        else:
+            entry = f"\n{header}\n{text}\n"
+
+        try:
+            res = self.write(note_name, entry, mode="append" if exists else "create")
+            self._schedule_index(target)
+            return res
+        except (VaultError, OSError) as exc:
+            log.warning("could not record daily log to vault: %s", exc)
+            return None
+
+    def record_research(
+        self,
+        topic: str,
+        content: str,
+        *,
+        title: str | None = None,
+        timestamp: str | None = None,
+        date_str: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Append or create a research note in Research/<topic>.md.
+
+        Safe to call when notes are not configured; returns None without raising.
+        """
+        if not self.is_configured():
+            return None
+        body = str(content or "").strip()
+        if not body:
+            return None
+        clean_topic = self._clean_topic(topic)
+        note_name = f"Research/{clean_topic}.md"
+        try:
+            target = self.note_path(note_name)
+        except (VaultError, OSError):
+            return None
+
+        now = datetime.datetime.now()
+        ds = date_str or now.strftime("%Y-%m-%d")
+        ts = timestamp or now.strftime("%H:%M")
+        exists = target.exists()
+
+        heading = title or clean_topic
+        if not exists:
+            entry = f"# {heading}\n\n*Recorded on {ds} {ts}*\n\n## Findings\n{body}\n"
+        else:
+            entry = f"\n## Findings ({ds} {ts})\n{body}\n"
+
+        try:
+            res = self.write(note_name, entry, mode="append" if exists else "create")
+            self._schedule_index(target)
+            return res
+        except (VaultError, OSError) as exc:
+            log.warning("could not record research note to vault: %s", exc)
+            return None
+
+    async def auto_record_turn(
+        self,
+        *,
+        request: str,
+        reply: str,
+        observations: list[str] | None = None,
+        task_summary: str | None = None,
+        task_title: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Evaluate a completed turn and record research findings or daily task logs.
+
+        Safe to call anytime; returns list of written note descriptors.
+        """
+        if not self.is_configured():
+            return []
+        if not bool(getattr(self.config.notes, "auto_notes", True)):
+            return []
+
+        user_text = str(request or "").strip()
+        final_text = str(reply or "").strip()
+        if not user_text or not final_text or final_text == "…":
+            return []
+
+        obs = observations or []
+        recorded: list[dict[str, Any]] = []
+
+        is_research = self._is_research_turn(user_text, final_text, obs)
+        if is_research:
+            topic = self._extract_topic(user_text)
+            clean_topic = self._clean_topic(topic)
+            res = self.record_research(
+                topic,
+                final_text,
+                title=task_title or user_text,
+            )
+            if res:
+                recorded.append(res)
+                daily_summary = (
+                    f"Completed research on {clean_topic}. "
+                    f"Findings saved in [[Research/{clean_topic}]]."
+                )
+                daily_res = self.record_daily_log(
+                    daily_summary,
+                    title=f"Research: {clean_topic}",
+                )
+                if daily_res:
+                    recorded.append(daily_res)
+        else:
+            is_task = self._is_task_turn(user_text, final_text, obs, task_summary)
+            if is_task:
+                summary = task_summary or self._summarize_task_result(user_text, final_text)
+                title = task_title or self._title_for(user_text)
+                daily_res = self.record_daily_log(summary, title=title)
+                if daily_res:
+                    recorded.append(daily_res)
+
+        return recorded
+
+    def _is_research_turn(
+        self, request: str, reply: str, observations: list[str]
+    ) -> bool:
+        req = request.lower()
+        research_keywords = (
+            "research",
+            "investigate",
+            "find out",
+            "explain",
+            "what is",
+            "what are",
+            "how does",
+            "how do",
+            "why does",
+            "why is",
+            "compare",
+            "comparison",
+            "overview of",
+            "differences between",
+            "difference between",
+            "deep dive",
+            "study",
+            "analysis",
+            "explore",
+            "learn about",
+            "look into",
+        )
+        asks_research = any(kw in req for kw in research_keywords)
+        any_search = any(
+            "search" in obs.lower() or "query" in obs.lower() for obs in observations
+        )
+        substantial = len(reply.strip()) >= 100
+        return (asks_research or any_search) and substantial
+
+    def _extract_topic(self, request: str) -> str:
+        req = request.strip()
+        patterns = [
+            r"^(?:please\s+)?(?:can\s+you\s+)?(?:could\s+you\s+)?research\s+(?:about\s+|on\s+)?",
+            r"^(?:please\s+)?(?:can\s+you\s+)?(?:could\s+you\s+)?investigate\s+(?:about\s+|on\s+)?",
+            r"^(?:please\s+)?(?:can\s+you\s+)?(?:could\s+you\s+)?look\s+into\s+",
+            r"^(?:please\s+)?(?:can\s+you\s+)?(?:could\s+you\s+)?find\s+out\s+(?:about\s+)?",
+            r"^(?:please\s+)?(?:can\s+you\s+)?(?:could\s+you\s+)?explain\s+(?:to\s+me\s+)?",
+            r"^(?:what\s+is\s+|what\s+are\s+)",
+            r"^(?:how\s+does\s+|how\s+do\s+)",
+            r"^(?:why\s+is\s+|why\s+does\s+)",
+            r"^(?:deep\s+dive\s+into\s+)",
+            r"^(?:compare\s+)",
+        ]
+        topic = req
+        for p in patterns:
+            m = re.match(p, topic, re.IGNORECASE)
+            if m:
+                topic = topic[m.end():]
+                break
+        topic = topic.rstrip("?.!")
+        return self._clean_topic(topic)
+
+    def _is_task_turn(
+        self,
+        request: str,
+        reply: str,
+        observations: list[str],
+        task_summary: str | None,
+    ) -> bool:
+        if task_summary and len(task_summary.strip()) >= 10:
+            return True
+        if observations and len(reply.strip()) >= 20:
+            return True
+        req = request.lower()
+        task_keywords = (
+            "fix",
+            "add",
+            "create",
+            "update",
+            "delete",
+            "remove",
+            "build",
+            "run",
+            "setup",
+            "install",
+            "clean",
+            "test",
+            "commit",
+            "deploy",
+            "implement",
+            "refactor",
+            "configure",
+            "modify",
+            "organize",
+            "start",
+            "stop",
+        )
+        return any(kw in req for kw in task_keywords) and len(reply.strip()) >= 20
+
+    @staticmethod
+    def _summarize_task_result(request: str, reply: str) -> str:
+        clean_reply = reply.strip()
+        if len(clean_reply) <= 300:
+            return clean_reply
+        paragraphs = [p.strip() for p in clean_reply.split("\n\n") if p.strip()]
+        if paragraphs:
+            return paragraphs[0][:400]
+        return clean_reply[:400]
+
+    @staticmethod
+    def _title_for(request: str) -> str:
+        text = " ".join(str(request or "").split())
+        if len(text) <= 50:
+            return text
+        cut = text[:50]
+        space = cut.rfind(" ")
+        if space >= 25:
+            cut = cut[:space]
+        return cut.rstrip(" ,.;:") + "…"

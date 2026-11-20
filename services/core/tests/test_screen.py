@@ -591,8 +591,84 @@ def test_running_apps(config: CapriConfig) -> None:
     )
 
 
+def test_blocked_apps() -> None:
+    cfg = CapriConfig()
+    cfg.policy.screen_allow_apps = []
+    cfg.policy.screen_block_apps = ["cmd.exe", "powershell*"]
+    policy = Policy(cfg.policy, "C:/work")
+
+    # Allowed by default when not in block list
+    allowed_launch = policy.check(screen_tools.LAUNCH_SPEC, {"app": "notepad.exe"})
+    check(allowed_launch.verdict == "allow", "unblocked app is allowed by default")
+    discord_launch = policy.check(screen_tools.LAUNCH_SPEC, {"app": "discord.exe"})
+    check(discord_launch.verdict == "allow", "discord is allowed by default")
+
+    # Blocked apps
+    cmd_launch = policy.check(screen_tools.LAUNCH_SPEC, {"app": "cmd.exe"})
+    check(cmd_launch.verdict == "block", "blocked app is blocked by policy")
+    ps_launch = policy.check(screen_tools.LAUNCH_SPEC, {"app": "powershell.exe"})
+    check(ps_launch.verdict == "block", "wildcard-blocked app is blocked")
+
+    # Service-level checks
+    svc, _, _ = service(cfg, [observation(process="notepad.exe")])
+    check(svc._process_allowed("notepad.exe") is True, "service allows unblocked app")
+    check(svc._process_allowed("discord.exe") is True, "service allows discord by default")
+    check(svc._process_allowed("cmd.exe") is False, "service disallows blocked app")
+    check(svc._process_allowed("powershell.exe") is False, "service disallows wildcard blocked app")
+
+    try:
+        svc._allowed_process("cmd.exe")
+        check(False, "_allowed_process raises on blocked app")
+    except ScreenBlocked as exc:
+        check("screen_block_apps" in str(exc), "_allowed_process raises ScreenBlocked for blocked app")
+
+
+def test_default_allow_apps() -> None:
+    cfg = CapriConfig()
+    cfg.policy.screen_allow_apps = []
+    cfg.policy.screen_block_apps = []
+    policy = Policy(cfg.policy, "C:/work")
+
+    check(
+        policy.check(screen_tools.LAUNCH_SPEC, {"app": "notepad.exe"}).verdict == "allow",
+        "notepad allowed by default",
+    )
+    check(
+        policy.check(screen_tools.LAUNCH_SPEC, {"app": "discord.exe"}).verdict == "allow",
+        "discord allowed by default",
+    )
+    check(
+        policy.check(screen_tools.LAUNCH_SPEC, {"app": "cmd.exe"}).verdict == "allow",
+        "cmd allowed by default when no blocklist",
+    )
+
+    svc, _, _ = service(cfg, [observation()])
+    check(svc._process_allowed("notepad.exe") is True, "all apps allowed when neither list set")
+    check(svc._process_allowed("discord.exe") is True, "discord allowed when neither list set")
+
+
+def test_launcher_resolution() -> None:
+    from capri_core.screen.service import resolve_windows_app
+
+    # Test resolution of discord
+    discord_res = resolve_windows_app("discord.exe")
+    check(discord_res is not None, "discord.exe resolves on Windows")
+    discord_bare_res = resolve_windows_app("discord")
+    check(discord_bare_res is not None, "bare discord resolves on Windows")
+
+    # Test resolution of notepad
+    notepad_res = resolve_windows_app("notepad.exe")
+    check(notepad_res is not None, "notepad.exe resolves via which/PATH")
+
+
 def main() -> int:
     config = CapriConfig()
+    config.policy.screen_allow_apps = [
+        "chrome.exe",
+        "code.exe",
+        "explorer.exe",
+        "notepad.exe",
+    ]
     config.screen.settle_ms = 300
     config.screen.max_elements = 100
     tests = [
@@ -608,6 +684,9 @@ def main() -> int:
         ("apps", lambda: test_running_apps(config)),
         ("activity", test_activity),
         ("tool", lambda: test_tool(config)),
+        ("blocked_apps", test_blocked_apps),
+        ("default_allow", test_default_allow_apps),
+        ("launcher_resolution", test_launcher_resolution),
     ]
     for name, run in tests:
         print(name)

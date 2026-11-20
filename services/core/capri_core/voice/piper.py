@@ -41,6 +41,7 @@ class PiperEngine:
     def __init__(self, config: CapriConfig) -> None:
         self.config = config
         self.path = voice_path(config)
+        self.device = (config.voice.device or "auto").lower()
         self._voice: object | None = None
         self._error: str | None = None
         self._lock = threading.Lock()
@@ -112,7 +113,30 @@ class PiperEngine:
                 raise TtsUnavailable(self._error) from exc
             log.info("loading piper from %s", self.path)
             try:
-                self._voice = PiperVoice.load(str(self.path), config_path=str(self.config_path))
+                use_cuda = self.device == "cuda"
+                self._voice = PiperVoice.load(
+                    str(self.path),
+                    config_path=str(self.config_path),
+                    use_cuda=use_cuda,
+                )
+                # If DirectML or auto GPU is requested, attach DmlExecutionProvider
+                if not use_cuda and self.device in ("auto", "directml", "dml"):
+                    try:
+                        import onnxruntime as ort
+
+                        if "DmlExecutionProvider" in ort.get_available_providers():
+                            sess_options = ort.SessionOptions()
+                            directml_sess = ort.InferenceSession(
+                                str(self.path),
+                                sess_options=sess_options,
+                                providers=["DmlExecutionProvider", "CPUExecutionProvider"],
+                            )
+                            # Override session with DirectML accelerated GPU session
+                            self._voice.session = directml_sess
+                            self.device = "directml"
+                            log.info("Piper voice accelerated on DirectML GPU")
+                    except Exception as exc:
+                        log.debug("could not attach DirectML provider for Piper: %s", exc)
             except Exception as exc:
                 self._error = f"Piper failed to load: {exc}"
                 raise TtsUnavailable(self._error) from exc

@@ -12,6 +12,8 @@ import base64
 import dataclasses
 import fnmatch
 import os
+import shutil
+import subprocess
 import threading
 import time
 from typing import Any, Callable, Iterable
@@ -63,10 +65,158 @@ class ScreenVerifyError(ScreenError):
         self.observation = observation
 
 
+def resolve_windows_app(app: str) -> tuple[str, list[str]] | str | None:
+    """Intelligently resolve a Windows app name to a path or executable invocation.
+
+    Checks:
+    1. PATH (shutil.which)
+    2. Registry App Paths (HKCU and HKLM)
+    3. %LOCALAPPDATA% (Update.exe --processStart, direct .exe, app-* subdirectories, Programs folder)
+    4. Start Menu shortcuts (.lnk) in APPDATA and ProgramData
+    5. %ProgramFiles% and %ProgramFiles(x86)%
+    """
+    if os.name != "nt":
+        return None
+    raw = str(app or "").strip()
+    if not raw:
+        return None
+    stem = raw[:-4] if raw.lower().endswith(".exe") else raw
+    exe_name = f"{stem}.exe"
+
+    # 1. PATH via shutil.which
+    found = shutil.which(raw) or shutil.which(exe_name)
+    if found:
+        return found
+
+    # 2. Registry App Paths
+    try:
+        import winreg
+
+        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            for sub in (exe_name, stem):
+                key_path = f"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{sub}"
+                try:
+                    with winreg.OpenKey(root, key_path) as key:
+                        val, _ = winreg.QueryValueEx(key, "")
+                        if val:
+                            cleaned = str(val).strip('"').strip()
+                            if os.path.exists(cleaned):
+                                return cleaned
+                except OSError:
+                    pass
+    except ImportError:
+        pass
+
+    # 3. %LOCALAPPDATA% (especially Discord and Squirrel apps)
+    localappdata = os.environ.get("LOCALAPPDATA", "")
+    if localappdata and os.path.exists(localappdata):
+        for folder_name in (stem, stem.capitalize(), stem.upper()):
+            candidate_dir = os.path.join(localappdata, folder_name)
+            if not os.path.isdir(candidate_dir):
+                continue
+            update_exe = os.path.join(candidate_dir, "Update.exe")
+            if os.path.exists(update_exe):
+                return (update_exe, ["--processStart", exe_name])
+            direct_exe = os.path.join(candidate_dir, exe_name)
+            if os.path.exists(direct_exe):
+                return direct_exe
+            try:
+                for sub in os.listdir(candidate_dir):
+                    if sub.startswith("app-"):
+                        nested_exe = os.path.join(candidate_dir, sub, exe_name)
+                        if os.path.exists(nested_exe):
+                            return nested_exe
+            except OSError:
+                pass
+
+        programs_dir = os.path.join(localappdata, "Programs")
+        if os.path.exists(programs_dir):
+            for folder_name in (stem, stem.capitalize()):
+                cand = os.path.join(programs_dir, folder_name, exe_name)
+                if os.path.exists(cand):
+                    return cand
+
+    # 4. Start Menu shortcuts (.lnk)
+    start_menu_roots = [
+        os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs"),
+        os.path.join(os.environ.get("ProgramData", ""), r"Microsoft\Windows\Start Menu\Programs"),
+    ]
+    fuzzy_lnk: str | None = None
+    for menu_root in start_menu_roots:
+        if not os.path.exists(menu_root):
+            continue
+        try:
+            for root_dir, _, files in os.walk(menu_root):
+                for f in files:
+                    if f.lower() == f"{stem.lower()}.lnk":
+                        return os.path.join(root_dir, f)
+                    if (
+                        fuzzy_lnk is None
+                        and f.lower().startswith(stem.lower())
+                        and f.lower().endswith(".lnk")
+                    ):
+                        fuzzy_lnk = os.path.join(root_dir, f)
+        except OSError:
+            pass
+    if fuzzy_lnk:
+        return fuzzy_lnk
+
+    # 5. ProgramFiles / ProgramFiles(x86)
+    for pf_var in ("ProgramFiles", "ProgramFiles(x86)"):
+        pf = os.environ.get(pf_var, "")
+        if pf and os.path.exists(pf):
+            for folder_name in (stem, stem.capitalize()):
+                cand = os.path.join(pf, folder_name, exe_name)
+                if os.path.exists(cand):
+                    return cand
+
+    return None
+
+
 def _default_launcher(app: str) -> None:
     if os.name != "nt":
         raise ScreenUnavailable("launching apps is Windows-only")
-    os.startfile(app)  # type: ignore[attr-defined]
+
+    resolved = resolve_windows_app(app)
+    if isinstance(resolved, tuple):
+        exe, args = resolved
+        try:
+            subprocess.Popen([exe, *args])
+            return
+        except Exception as exc:
+            raise ScreenError(f"could not launch {app} via {exe}: {exc}") from exc
+    if isinstance(resolved, str):
+        try:
+            os.startfile(resolved)  # type: ignore[attr-defined]
+            return
+        except OSError:
+            pass
+
+    # Try direct os.startfile with the raw app / exe name
+    try:
+        os.startfile(app)  # type: ignore[attr-defined]
+        return
+    except OSError:
+        pass
+
+    stem = app[:-4] if app.lower().endswith(".exe") else app
+    if stem != app:
+        try:
+            os.startfile(stem)  # type: ignore[attr-defined]
+            return
+        except OSError:
+            pass
+
+    # Fallback to PowerShell Start-Process
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", f"Start-Process '{stem}'"],
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception as exc:
+        raise ScreenError(f"could not launch {app}: {exc}") from exc
 
 
 def observation_payload(observation: Observation, *, shot: bool = False) -> dict[str, Any]:
@@ -127,7 +277,8 @@ class ScreenService:
             "enabled": self.config.screen.enabled,
             "available": self.backend.available(),
             "reason": self.backend.reason(),
-            "allowApps": list(self.config.policy.screen_allow_apps),
+            "allowApps": list(getattr(self.config.policy, "screen_allow_apps", ())),
+            "blockApps": list(getattr(self.config.policy, "screen_block_apps", ())),
             "window": self.last.title if self.last else None,
             "process": self.last.process if self.last else None,
             "paused": self._paused,
@@ -171,7 +322,11 @@ class ScreenService:
             # Listing is the start of a deliberate screen task, so the idle
             # guard should measure input from here, not from an old command.
             self.activity.mark()
-            return {"windows": rows, "allowApps": list(self.config.policy.screen_allow_apps)}
+            return {
+                "windows": rows,
+                "allowApps": list(getattr(self.config.policy, "screen_allow_apps", ())),
+                "blockApps": list(getattr(self.config.policy, "screen_block_apps", ())),
+            }
 
     def running_apps(self) -> dict[str, Any]:
         """Every visible window's process name, allowlisted or not.
@@ -197,7 +352,8 @@ class ScreenService:
                     }
                     for name, count in sorted(counts.items())
                 ],
-                "allowApps": list(self.config.policy.screen_allow_apps),
+                "allowApps": list(getattr(self.config.policy, "screen_allow_apps", ())),
+                "blockApps": list(getattr(self.config.policy, "screen_block_apps", ())),
             }
 
     def input_idle_s(self) -> float:
@@ -240,18 +396,16 @@ class ScreenService:
         name = str(app or "").strip()
         if not name or os.path.basename(name).lower() != name.lower() or "/" in name or "\\" in name:
             raise ScreenBlocked("launch takes an application name such as notepad.exe, not a path")
-        patterns = self._patterns()
-        if not any(fnmatch.fnmatch(name.lower(), pattern) for pattern in patterns):
-            raise ScreenBlocked(
-                f"{name} is not in policy.screen_allow_apps; add it before I can launch it"
-            )
+        self._allowed_process(name)
 
         with self._lock:
             self._require_available()
+            stem = name[:-4].lower() if name.lower().endswith(".exe") else name.lower()
+            exe = f"{stem}.exe"
             existing = [
                 window
                 for window in self.backend.windows()
-                if window.process.lower() == name.lower()
+                if window.process.lower() in (name.lower(), stem, exe)
             ]
             self.activity.mark()  # launching is the deliberate start of the task
             if existing:
@@ -276,7 +430,7 @@ class ScreenService:
                 matches = [
                     item
                     for item in self.backend.windows()
-                    if item.process.lower() == name.lower()
+                    if item.process.lower() in (name.lower(), stem, exe)
                 ]
                 if matches:
                     window = matches[0]
@@ -592,20 +746,58 @@ class ScreenService:
         if not self.backend.available():
             raise ScreenUnavailable(self.backend.reason())
 
-    def _patterns(self) -> list[str]:
-        return [pattern.lower() for pattern in self.config.policy.screen_allow_apps]
+    def _block_patterns(self) -> list[str]:
+        return [pattern.lower() for pattern in getattr(self.config.policy, "screen_block_apps", ())]
+
+    def _allow_patterns(self) -> list[str]:
+        return [pattern.lower() for pattern in getattr(self.config.policy, "screen_allow_apps", ())]
 
     def _process_allowed(self, process: str) -> bool:
-        candidate = (process or "").lower()
+        candidate = (process or "").strip().lower()
         if not candidate:
             return False
-        return any(fnmatch.fnmatch(candidate, pattern) for pattern in self._patterns())
+        stem = candidate[:-4] if candidate.endswith(".exe") else candidate
+        exe = f"{stem}.exe"
+        candidates = (candidate, stem, exe)
+
+        block_patterns = self._block_patterns()
+        if any(
+            any(fnmatch.fnmatch(c, pattern) for pattern in block_patterns)
+            for c in candidates
+        ):
+            return False
+
+        allow_patterns = self._allow_patterns()
+        if allow_patterns:
+            return any(
+                any(fnmatch.fnmatch(c, pattern) for pattern in allow_patterns)
+                for c in candidates
+            )
+
+        return True
 
     def _allowed_process(self, process: str) -> None:
-        candidate = (process or "").lower()
+        candidate = (process or "").strip().lower()
         if not candidate:
             raise ScreenBlocked("cannot verify which app that window belongs to; screen control stays off")
-        if not self._process_allowed(candidate):
+        stem = candidate[:-4] if candidate.endswith(".exe") else candidate
+        exe = f"{stem}.exe"
+        candidates = (candidate, stem, exe)
+
+        block_patterns = self._block_patterns()
+        if any(
+            any(fnmatch.fnmatch(c, pattern) for pattern in block_patterns)
+            for c in candidates
+        ):
+            raise ScreenBlocked(
+                f"{candidate} is in policy.screen_block_apps; screen control is blocked"
+            )
+
+        allow_patterns = self._allow_patterns()
+        if allow_patterns and not any(
+            any(fnmatch.fnmatch(c, pattern) for pattern in allow_patterns)
+            for c in candidates
+        ):
             raise ScreenBlocked(
                 f"{candidate} is not in policy.screen_allow_apps; add it before I can touch it"
             )

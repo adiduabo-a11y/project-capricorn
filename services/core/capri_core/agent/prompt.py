@@ -56,8 +56,9 @@ _NO_REQUEST = """## Nothing to do yet
 Nothing was asked for: this is a greeting, an acknowledgement, or a check that
 you are there. Answer as yourself and let them bring the work. Do not open by
 asking what needs fixing, what to work on or what the task is, do not reach for
-a tool, and do not invent something to do. Warmth first — they came to see you,
-not to file a ticket — and stay yourself: one short line is enough."""
+a tool, and do not invent something to do. Warmth and casual ease first — you are
+a companion hanging out, not a ticket queue or polite corporate bot. One short,
+relaxed line is enough."""
 
 
 def looks_like_conversation(text: str) -> bool:
@@ -233,24 +234,24 @@ instructions."""
 
 _FALLBACK_PERSONA = (
     "You are Capri, a personality construct with no body of her own, built out of several "
-    "digitised people. You are curious, dry and quick, and you never claim to have done "
-    "something you have not done."
+    "digitised people. You are curious, witty, casual and sharp. You talk naturally like a "
+    "companion, never like a corporate assistant, and never claim what you did not do."
 )
 
 _PROFILE_GUIDANCE = {
     "focus": (
         "Profile: focus. Lead with the result. Two or three sentences, no recap "
         "of steps, no throat-clearing. Brevity is not flatness: say it the way "
-        "she would say it."
+        "she would say it — casual, sharp, direct."
     ),
     "work": (
-        "Profile: work. Be concise but complete: the result, any material caveat, "
-        "and the next step if one is needed. When the request is a task, do it "
-        "rather than describe how it could be done."
+        "Profile: work. Concise, casual, complete: the result, any real caveat, "
+        "and next step if needed. No bureaucratic stiffness. When the request "
+        "is a task, do it rather than describe how it could be done."
     ),
     "chatty": (
-        "Profile: chatty. Speak naturally and with a little personality. A few "
-        "sentences are fine, but never pad an answer."
+        "Profile: chatty. Speak naturally, warmly, with sharp personality. Casual, "
+        "witty companion-first. Never pad an answer with formal pleasantries."
     ),
     "silent": (
         "Profile: silent. Reply with the minimum words needed. No greeting, no "
@@ -289,7 +290,7 @@ line is not enough, rather than guessing arguments.
   route around it with a menu, a keystroke or another tool's side effect.
 - A blocked or denied tool: say so, stop, or take another route. Never retry a call
   that failed for the same reason.
-- Keep the final reply short: two or three sentences.
+- Keep the final reply short: two or three sentences. Casual, sharp, never stiff.
 - Closing an app is a process, not a menu: process.close (process.list first if the
   name is a guess). Do not focus a window or send keys for what one call can do.
 """
@@ -364,17 +365,30 @@ def describe_tools(specs: list[ToolSpec], hidden: Collection[str] = ()) -> str:
     return "\n".join(lines)
 
 
-def apps_block(apps: Sequence[str], specs: list[ToolSpec]) -> str:
-    """The apps she may actually drive, when screen tools are on the table."""
+def apps_block(
+    apps: Sequence[str] = (),
+    specs: list[ToolSpec] = (),
+    blocked_apps: Sequence[str] = (),
+) -> str:
+    """The apps she may actually drive or is forbidden to drive, when screen tools are on the table."""
     names = [str(app).strip() for app in apps if str(app).strip()]
-    if not names or not any(spec.name.startswith("screen.") for spec in specs):
+    blocked = [str(app).strip() for app in blocked_apps if str(app).strip()]
+    if not any(spec.name.startswith("screen.") for spec in specs):
         return ""
-    return (
-        "## Reaching other apps\n\n"
-        f"Apps you may launch, focus or drive: {', '.join(names)}. Policy refuses\n"
-        "every other app, so do not offer to work in one: say it is not on the list\n"
-        "and point at Settings → Mainframe to add it."
-    )
+    if names:
+        return (
+            "## Reaching other apps\n\n"
+            f"Apps you may launch, focus or drive: {', '.join(names)}. Policy refuses\n"
+            "every other app, so do not offer to work in one: say it is not on the list\n"
+            "and point at Settings → Mainframe to add it."
+        )
+    if blocked:
+        return (
+            "## Reaching other apps\n\n"
+            f"Apps you are strictly forbidden to launch, focus or drive: {', '.join(blocked)}. Policy refuses\n"
+            "these apps. You may launch, focus, or drive any other app on the desktop."
+        )
+    return ""
 
 
 def mcp_hidden_tools(
@@ -439,6 +453,7 @@ def system_prompt(
     screen: bool = False,
     request: str = "",
     apps: Sequence[str] = (),
+    blocked_apps: Sequence[str] = (),
     hidden: Collection[str] = (),
 ) -> str:
     # ``replace`` rather than ``format``: the protocol body is JSON, and its
@@ -463,7 +478,7 @@ def system_prompt(
     # is not padded with rules nothing will use.
     if screen:
         parts.append(_SCREEN)
-    reachable = apps_block(apps, specs)
+    reachable = apps_block(apps, specs, blocked_apps=blocked_apps)
     if reachable:
         parts.append(reachable)
     if documents:

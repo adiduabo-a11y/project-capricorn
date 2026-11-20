@@ -133,6 +133,16 @@ class PocketEngine:
                 from pocket_tts import TTSModel
 
                 self._model = TTSModel.load_model(language=self.language)
+                dev = (self.config.voice.device or "auto").lower()
+                if dev in ("cuda", "auto"):
+                    try:
+                        import torch
+
+                        if torch.cuda.is_available():
+                            self._model = self._model.to("cuda")
+                            log.info("Pocket moved to CUDA GPU")
+                    except Exception:
+                        pass
                 self.sample_rate = int(getattr(self._model, "sample_rate", POCKET_SAMPLE_RATE))
                 log.info("Pocket %s loaded (%d Hz)", self.language, self.sample_rate)
             except Exception as exc:
